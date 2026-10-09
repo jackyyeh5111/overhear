@@ -1,21 +1,31 @@
-"""Stream macOS system audio (via a loopback device) to Deepgram live STT.
+"""Stream macOS system audio to Deepgram live STT.
+
+System audio is captured with ScreenCaptureKit via the small `syscap` Swift helper
+(built automatically on first run), so no virtual audio device is needed.
 
 Usage:
     export DEEPGRAM_API_KEY=...
-    .venv/bin/python stream_system_audio.py --list
-    .venv/bin/python stream_system_audio.py --device "iShowU Audio Capture"
+    .venv/bin/python stream_system_audio.py                   # system audio
+    .venv/bin/python stream_system_audio.py --list            # list input devices
+    .venv/bin/python stream_system_audio.py --device "MacBook Pro Microphone"
 """
 import argparse
 import asyncio
 import json
 import os
 import ssl
+import subprocess
 import sys
 from urllib.parse import urlencode
 
 import certifi
 import sounddevice as sd
 import websockets
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+HELPER_SRC = os.path.join(HERE, "syscap.swift")
+HELPER_BIN = os.path.join(HERE, "syscap")
+SYSTEM_RATE = 48000
 
 
 def build_url(sample_rate: int) -> str:
@@ -37,7 +47,7 @@ def load_key() -> str | None:
     if key := os.environ.get("DEEPGRAM_API_KEY"):
         return key
     # Fall back to a .env file next to this script (DEEPGRAM_API_KEY=...)
-    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    env_path = os.path.join(HERE, ".env")
     if os.path.exists(env_path):
         with open(env_path) as f:
             for line in f:
@@ -47,20 +57,55 @@ def load_key() -> str | None:
     return None
 
 
-async def run(device: str):
-    key = load_key()
-    if not key:
-        sys.exit("Set DEEPGRAM_API_KEY (env var or .env file next to this script).")
+def build_helper():
+    if os.path.exists(HELPER_BIN) and os.path.getmtime(HELPER_BIN) >= os.path.getmtime(HELPER_SRC):
+        return
+    print("Building syscap helper (one-time)...")
+    subprocess.run(["swiftc", "-O", "-swift-version", "5", "-o", HELPER_BIN, HELPER_SRC], check=True)
 
-    info = sd.query_devices(device, "input")
-    sample_rate = int(info["default_samplerate"])
-    print(f"Capturing '{info['name']}' @ {sample_rate} Hz — Ctrl+C to stop\n")
 
+async def system_audio(sample_rate: int):
+    # ~100 ms chunks of 16-bit mono PCM from the ScreenCaptureKit helper
+    proc = await asyncio.create_subprocess_exec(
+        HELPER_BIN, str(sample_rate), stdout=asyncio.subprocess.PIPE)
+    try:
+        while chunk := await proc.stdout.read(sample_rate // 10 * 2):
+            yield chunk
+    finally:
+        if proc.returncode is None:
+            proc.terminate()
+            await proc.wait()
+
+
+async def device_audio(device, sample_rate: int):
+    # ~100 ms chunks of 16-bit mono PCM from an input device
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[bytes] = asyncio.Queue()
 
     def on_audio(indata, frames, time_info, status):
         loop.call_soon_threadsafe(queue.put_nowait, bytes(indata))
+
+    with sd.RawInputStream(device=device, samplerate=sample_rate, channels=1,
+                           dtype="int16", blocksize=sample_rate // 10,
+                           callback=on_audio):
+        while True:
+            yield await queue.get()
+
+
+async def run(device):
+    key = load_key()
+    if not key:
+        sys.exit("Set DEEPGRAM_API_KEY (env var or .env file next to this script).")
+
+    if device is None:
+        sample_rate = SYSTEM_RATE
+        source = system_audio(sample_rate)
+        print(f"Capturing system audio @ {sample_rate} Hz — Ctrl+C to stop\n")
+    else:
+        info = sd.query_devices(device, "input")
+        sample_rate = int(info["default_samplerate"])
+        source = device_audio(device, sample_rate)
+        print(f"Capturing '{info['name']}' @ {sample_rate} Hz — Ctrl+C to stop\n")
 
     async with websockets.connect(
         build_url(sample_rate),
@@ -70,12 +115,10 @@ async def run(device: str):
     ) as ws:
 
         async def sender():
-            # ~100 ms chunks of 16-bit mono PCM
-            with sd.RawInputStream(device=device, samplerate=sample_rate, channels=1,
-                                   dtype="int16", blocksize=sample_rate // 10,
-                                   callback=on_audio):
-                while True:
-                    await ws.send(await queue.get())
+            async for chunk in source:
+                await ws.send(chunk)
+            # Audio source ended (e.g. helper exited) — stop the session
+            await ws.close()
 
         async def receiver():
             async for raw in ws:
@@ -103,14 +146,19 @@ async def run(device: str):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--device", default="iShowU Audio Capture",
-                   help="input device name (substring ok) or index")
+    p.add_argument("--device",
+                   help="capture this input device (name substring or index) "
+                        "instead of system audio")
     p.add_argument("--list", action="store_true", help="list audio devices and exit")
     args = p.parse_args()
     if args.list:
         print(sd.query_devices())
         return
-    device = int(args.device) if args.device.isdigit() else args.device
+    device = args.device
+    if device is None:
+        build_helper()
+    elif device.isdigit():
+        device = int(device)
     try:
         asyncio.run(run(device))
     except KeyboardInterrupt:

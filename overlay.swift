@@ -24,10 +24,91 @@ final class OverlayPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+struct Edges: OptionSet {
+    let rawValue: Int
+    static let left = Edges(rawValue: 1 << 0)
+    static let right = Edges(rawValue: 1 << 1)
+    static let top = Edges(rawValue: 1 << 2)
+    static let bottom = Edges(rawValue: 1 << 3)
+}
+
 // The panel never becomes key, so every click is a "first" click; accept them all.
+// Dragging the border resizes and shows a resize cursor; dragging anywhere else moves.
 final class RootView: NSView {
+    private let edgeWidth: CGFloat = 6
+    private let cornerSize: CGFloat = 16
+
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override func mouseDown(with event: NSEvent) { window?.performDrag(with: event) }
+
+    // The app is never active, so cursor rects don't apply; track the pointer ourselves.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(
+            rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self))
+    }
+
+    override func mouseMoved(with event: NSEvent) { cursor(for: edges(at: event)).set() }
+    override func mouseExited(with event: NSEvent) { NSCursor.arrow.set() }
+
+    override func mouseDown(with event: NSEvent) {
+        let grabbed = edges(at: event)
+        if grabbed.isEmpty { window?.performDrag(with: event) } else { resize(grabbed) }
+    }
+
+    private func edges(at event: NSEvent) -> Edges {
+        let p = convert(event.locationInWindow, from: nil)
+        guard p.x < edgeWidth || p.x > bounds.width - edgeWidth
+                || p.y < edgeWidth || p.y > bounds.height - edgeWidth else { return [] }
+        // Within the border band, the ends of each edge count as corners.
+        var edges: Edges = []
+        if p.x < cornerSize { edges.insert(.left) } else if p.x > bounds.width - cornerSize { edges.insert(.right) }
+        if p.y < cornerSize { edges.insert(.bottom) } else if p.y > bounds.height - cornerSize { edges.insert(.top) }
+        return edges
+    }
+
+    private func cursor(for edges: Edges) -> NSCursor {
+        let position: NSCursor.FrameResizePosition
+        switch edges {
+        case [.top, .left]: position = .topLeft
+        case [.top, .right]: position = .topRight
+        case [.bottom, .left]: position = .bottomLeft
+        case [.bottom, .right]: position = .bottomRight
+        case .left: position = .left
+        case .right: position = .right
+        case .top: position = .top
+        case .bottom: position = .bottom
+        default: return .arrow
+        }
+        return .frameResize(position: position, directions: .all)
+    }
+
+    private func resize(_ edges: Edges) {
+        guard let window else { return }
+        let start = NSEvent.mouseLocation
+        let startFrame = window.frame
+        while let event = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]),
+              event.type == .leftMouseDragged {
+            let dx = NSEvent.mouseLocation.x - start.x
+            let dy = NSEvent.mouseLocation.y - start.y
+            var frame = startFrame
+            if edges.contains(.left) {
+                frame.size.width = max(window.minSize.width, startFrame.width - dx)
+                frame.origin.x = startFrame.maxX - frame.width
+            } else if edges.contains(.right) {
+                frame.size.width = max(window.minSize.width, startFrame.width + dx)
+            }
+            if edges.contains(.bottom) {
+                frame.size.height = max(window.minSize.height, startFrame.height - dy)
+                frame.origin.y = startFrame.maxY - frame.height
+            } else if edges.contains(.top) {
+                frame.size.height = max(window.minSize.height, startFrame.height + dy)
+            }
+            window.setFrame(frame, display: true)
+            cursor(for: edges).set()
+        }
+    }
 }
 
 final class DragTextView: NSTextView {
@@ -70,6 +151,7 @@ final class Overlay: NSObject, NSWindowDelegate {
         panel.hasShadow = false
         panel.hidesOnDeactivate = false
         panel.minSize = minSize
+        panel.acceptsMouseMovedEvents = true  // feeds RootView's resize cursors
         panel.delegate = self
         panel.contentView = root
 
@@ -268,8 +350,28 @@ final class Overlay: NSObject, NSWindowDelegate {
     }
 }
 
+/// Lets NSCursor.set() take effect while the app is inactive, which this overlay always is.
+/// Uses a private WindowServer property, looked up at runtime so a missing symbol only
+/// costs the resize cursors.
+func allowCursorInBackground() {
+    typealias DefaultConnection = @convention(c) () -> Int32
+    typealias SetProperty = @convention(c) (Int32, Int32, CFString, CFTypeRef) -> Int32
+    guard let defaultSym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_CGSDefaultConnection"),
+          let setSym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGSSetConnectionProperty") else {
+        FileHandle.standardError.write("overlay: resize cursors unavailable\n".data(using: .utf8)!)
+        return
+    }
+    let connection = unsafeBitCast(defaultSym, to: DefaultConnection.self)()
+    let status = unsafeBitCast(setSym, to: SetProperty.self)(
+        connection, connection, "SetsCursorInBackground" as CFString, kCFBooleanTrue)
+    if status != 0 {
+        FileHandle.standardError.write("overlay: resize cursors unavailable (\(status))\n".data(using: .utf8)!)
+    }
+}
+
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)  // no Dock icon or menu bar
+allowCursorInBackground()
 
 let overlay = Overlay()
 overlay.panel.orderFrontRegardless()  // show without activating, so focus stays where it was

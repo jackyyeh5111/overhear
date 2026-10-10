@@ -27,13 +27,14 @@ Apple's ScreenCaptureKit.
 - macOS 13 or later (ScreenCaptureKit audio capture)
 - Xcode Command Line Tools, for `swiftc` (`xcode-select --install`)
 - Python 3.11+
+- [uv](https://docs.astral.sh/uv/) (`brew install uv`)
 - A Deepgram API key: create one at <https://console.deepgram.com>
 
 ## Setup
 
 ```sh
-python3 -m venv .venv
-.venv/bin/pip install certifi sounddevice websockets
+uv venv
+uv pip install -r requirements.txt
 ```
 
 Provide your API key either as an environment variable:

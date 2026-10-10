@@ -68,8 +68,9 @@ them whenever their `.swift` sources change. The **Overhear** window opens:
    show up there and in the terminal as audio plays.
 2. End the session from the overlay toolbar with **Save** or **Discard** (Discard asks for a
    second click). Either way you return to the Overhear window.
-3. Saved sessions are listed newest first. Double-click one (or select it and press Return) to
-   replay it; press Delete or right-click → *Move to Trash* to remove it.
+3. Saved sessions are listed newest first, named `recording1`, `recording2`, … Double-click one
+   (or select it and press Return) to replay it. Right-click → *Rename* to give it a better name
+   (Return saves, Esc cancels). Press Delete or right-click → *Move to Trash* to remove it.
 
 Close the Overhear window, press **⌘Q**, or press **Ctrl+C** in the terminal to quit.
 
@@ -106,7 +107,7 @@ Each saved session is a folder in `~/Library/Application Support/Overhear/record
 ```
 2026-10-09_14-30-05/
   audio.m4a       the audio Deepgram heard, as AAC (about 30 MB per hour)
-  captions.json   {"started_at": "...", "duration": 3612.4,
+  captions.json   {"name": "recording3", "started_at": "...", "duration": 3612.4,
                    "lines": [{"start": 0.84, "end": 4.1, "text": "..."}, ...]}
 ```
 

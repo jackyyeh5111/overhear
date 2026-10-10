@@ -11,6 +11,7 @@ struct CaptionLine: Decodable {
 
 struct Recording {
     let folder: URL
+    let name: String
     let startedAt: Date
     let duration: Double
     let lines: [CaptionLine]
@@ -33,7 +34,19 @@ struct Recording {
         try FileManager.default.trashItem(at: folder, resultingItemURL: nil)
     }
 
+    /// Stores a new name in captions.json, leaving the rest of the file as it was.
+    func rename(to newName: String) throws {
+        let url = folder.appendingPathComponent("captions.json")
+        guard var json = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any] else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        json["name"] = newName
+        try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+            .write(to: url, options: .atomic)
+    }
+
     private struct File: Decodable {
+        let name: String?  // missing in recordings saved before names existed
         let started_at: String
         let duration: Double
         let lines: [CaptionLine]
@@ -43,7 +56,8 @@ struct Recording {
         guard let data = try? Data(contentsOf: folder.appendingPathComponent("captions.json")),
               let file = try? JSONDecoder().decode(File.self, from: data),
               let startedAt = ISO8601DateFormatter().date(from: file.started_at) else { return nil }
-        return Recording(folder: folder, startedAt: startedAt, duration: file.duration, lines: file.lines)
+        return Recording(folder: folder, name: file.name ?? folder.lastPathComponent,
+                         startedAt: startedAt, duration: file.duration, lines: file.lines)
     }
 
     private static let dateFormat: DateFormatter = {

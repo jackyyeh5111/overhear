@@ -2,7 +2,7 @@ import json
 import subprocess
 import wave
 
-from recording import PARTIAL, Recording, cleanup_partials
+from recording import PARTIAL, Recording, cleanup_partials, next_name
 
 RATE = 16000
 
@@ -40,7 +40,7 @@ def test_save_writes_m4a_and_captions(tmp_path):
     assert path == tmp_path / rec.stamp
     assert sorted(p.name for p in path.iterdir()) == ["audio.m4a", "captions.json"]
     captions = json.loads((path / "captions.json").read_text())
-    assert captions == {"started_at": rec.started_at, "duration": 1.0,
+    assert captions == {"name": "recording1", "started_at": rec.started_at, "duration": 1.0,
                         "lines": [{"start": 0.1, "end": 0.9, "text": "first"}]}
     assert list((tmp_path / PARTIAL).iterdir()) == []
 
@@ -98,3 +98,22 @@ def test_same_second_recordings_get_distinct_folders(tmp_path):
     rec.write(tone(0.2))
     (tmp_path / rec.stamp).mkdir()  # an earlier recording from the same second
     assert rec.save() == tmp_path / f"{rec.stamp}-2"
+
+
+def test_next_name_counts_past_the_highest_default(tmp_path):
+    assert next_name(tmp_path) == "recording1"
+    for folder, name in [("a", "recording1"), ("b", "recording3"), ("c", "Standup")]:
+        (tmp_path / folder).mkdir()
+        (tmp_path / folder / "captions.json").write_text(json.dumps({"name": name}))
+    (tmp_path / "d").mkdir()
+    (tmp_path / "d" / "captions.json").write_text("not json")
+    assert next_name(tmp_path) == "recording4"
+
+
+def test_saved_recordings_get_increasing_names(tmp_path):
+    names = []
+    for _ in range(2):
+        rec = Recording(tmp_path, RATE)
+        rec.write(tone(0.2))
+        names.append(json.loads((rec.save() / "captions.json").read_text())["name"])
+    assert names == ["recording1", "recording2"]

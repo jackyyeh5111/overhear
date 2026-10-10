@@ -4,12 +4,15 @@ While recording, everything lives in `<root>/.partial/<stamp>/`. Saving converts
 and moves the folder to `<root>/<stamp>/`:
 
     <stamp>/audio.m4a       the exact audio Deepgram heard (audio.wav if conversion failed)
-    <stamp>/captions.json   {"started_at", "duration", "lines": [{"start", "end", "text"}, ...]}
+    <stamp>/captions.json   {"name", "started_at", "duration", "lines": [{"start", "end", "text"}, ...]}
+
+The name defaults to "recording<N>"; the app can rename it later.
 
 Line times come straight from Deepgram, which counts seconds of audio received, so they are
 positions in audio.m4a. That's what keeps replay in lockstep.
 """
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -25,6 +28,23 @@ MIN_KEEP_SECONDS = 3
 def cleanup_partials(root: Path = RECORDINGS_DIR):
     """Deletes sessions left half-written by a crash or hard kill."""
     shutil.rmtree(root / PARTIAL, ignore_errors=True)
+
+
+def next_name(root: Path) -> str:
+    """The default name for a new recording: one past the highest "recording<N>" in `root`.
+
+    Numbers are never reused while a recording holds them, so deleting one doesn't renumber
+    the rest. E.g. names recording1, recording3 and "Standup" → "recording4".
+    """
+    highest = 0
+    for captions in root.glob("*/captions.json"):
+        try:
+            name = json.loads(captions.read_text()).get("name", "")
+        except (OSError, ValueError):
+            continue
+        if m := re.fullmatch(r"recording(\d+)", name):
+            highest = max(highest, int(m[1]))
+    return f"recording{highest + 1}"
 
 
 class Recording:
@@ -80,6 +100,7 @@ class Recording:
             (self.dir / "audio.m4a").unlink(missing_ok=True)
             print(f"Could not convert audio to AAC, keeping WAV: {e}", file=sys.stderr)
         (self.dir / "captions.json").write_text(json.dumps({
+            "name": next_name(self.root),
             "started_at": self.started_at,
             "duration": round(self.duration, 3),
             "lines": self.lines,

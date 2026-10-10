@@ -1,4 +1,4 @@
-// The main window: Start a live session, or open / trash a saved recording.
+// The main window: Start a live session, or open / rename / trash a saved recording.
 import AppKit
 
 /// Return opens the selected recording; Delete moves it to the Trash.
@@ -15,7 +15,8 @@ final class RecordingsTable: NSTableView {
     }
 }
 
-final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate {
+final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate,
+                  NSTextFieldDelegate {
     var onStart: (() -> Void)?
     var onOpen: ((Recording) -> Void)?
 
@@ -48,13 +49,13 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
         let heading = NSTextField(labelWithString: "Recordings")
         heading.font = .boldSystemFont(ofSize: 13)
 
-        for (id, title, width) in [("date", "Date", 170.0), ("duration", "Length", 70), ("preview", "Captions", 300)] {
+        for (id, title, width) in [("name", "Name", 280.0), ("date", "Date", 170), ("duration", "Length", 70)] {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
             column.title = title
             column.width = width
             table.addTableColumn(column)
         }
-        table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        table.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
         table.usesAlternatingRowBackgroundColors = true
         table.dataSource = self
         table.delegate = self
@@ -63,8 +64,10 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
         table.onReturn = { [weak self] in self?.open(row: self?.table.selectedRow ?? -1) }
         table.onDelete = { [weak self] in self?.trash(row: self?.table.selectedRow ?? -1) }
         table.menu = NSMenu()
+        table.menu!.addItem(NSMenuItem(title: "Rename", action: #selector(renameClicked), keyEquivalent: ""))
+        table.menu!.addItem(.separator())
         table.menu!.addItem(NSMenuItem(title: "Move to Trash", action: #selector(trashClicked), keyEquivalent: ""))
-        table.menu!.items[0].target = self
+        table.menu!.items.forEach { $0.target = self }
 
         let scroll = NSScrollView()
         scroll.documentView = table
@@ -117,6 +120,42 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
         trash(row: table.clickedRow >= 0 ? table.clickedRow : table.selectedRow)
     }
 
+    /// Turns the row's name into an editable field; Return saves, Esc cancels.
+    @objc private func renameClicked() {
+        let row = table.clickedRow >= 0 ? table.clickedRow : table.selectedRow
+        guard recordings.indices.contains(row),
+              let field = table.view(atColumn: 0, row: row, makeIfNecessary: true) as? NSTextField else { return }
+        table.selectRowIndexes([row], byExtendingSelection: false)
+        field.isEditable = true
+        window.makeFirstResponder(field)  // selects the whole name
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        guard selector == #selector(NSResponder.cancelOperation(_:)),
+              recordings.indices.contains(table.row(for: control)) else { return false }
+        control.stringValue = recordings[table.row(for: control)].name
+        window.makeFirstResponder(table)
+        return true
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        guard let field = notification.object as? NSTextField else { return }
+        field.isEditable = false
+        let row = table.row(for: field)
+        guard recordings.indices.contains(row) else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !name.isEmpty && name != recordings[row].name {
+            do {
+                try recordings[row].rename(to: name)
+            } catch {
+                NSAlert(error: error).beginSheetModal(for: window)
+            }
+        }
+        reload()
+        table.selectRowIndexes([row], byExtendingSelection: false)
+        window.makeFirstResponder(table)
+    }
+
     private func open(row: Int) {
         guard recordings.indices.contains(row) else { return }
         onOpen?(recordings[row])
@@ -150,14 +189,14 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
         cell.lineBreakMode = .byTruncatingTail
         let recording = recordings[row]
         switch id.rawValue {
+        case "name":
+            cell.stringValue = recording.name
+            cell.delegate = self
         case "date":
             cell.stringValue = recording.title
-        case "duration":
+        default:
             cell.stringValue = formatTime(recording.duration)
             cell.alignment = .right
-        default:
-            cell.stringValue = recording.lines.first?.text ?? "(no captions)"
-            cell.textColor = recording.lines.isEmpty ? .secondaryLabelColor : .labelColor
         }
         return cell
     }

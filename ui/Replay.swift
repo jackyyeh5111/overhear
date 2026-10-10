@@ -102,7 +102,7 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         player = try? AVAudioPlayer(contentsOf: recording.audioURL)
         player?.delegate = self
         player?.prepareToPlay()
-        window.title = "Replay — \(recording.title)"
+        window.title = "\(recording.name) — \(recording.title)"
         current = -1
         table.reloadData()
         table.scrollRowToVisible(0)

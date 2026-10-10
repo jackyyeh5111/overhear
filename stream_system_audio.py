@@ -1,16 +1,17 @@
-"""Stream macOS system audio to Deepgram live STT.
+"""Stream macOS system audio and/or the microphone to Deepgram live STT.
 
 System audio is captured with ScreenCaptureKit via the small `syscap` Swift helper
 (built automatically on first run), so no virtual audio device is needed. The `overhear-ui`
 app (another Swift helper) starts sessions from its Home window, shows live captions in a
-floating, transparent overlay, and replays saved recordings.
+floating, transparent overlay, and replays saved recordings. The overlay turns system audio
+and the mic on and off independently; whatever is on is mixed into one stream.
 
 Usage:
     export DEEPGRAM_API_KEY=...
-    .venv/bin/python stream_system_audio.py                   # system audio, with the app
-    .venv/bin/python stream_system_audio.py --no-overlay      # terminal only, no recording
+    .venv/bin/python stream_system_audio.py                   # with the app
+    .venv/bin/python stream_system_audio.py --no-overlay      # terminal only, system audio
     .venv/bin/python stream_system_audio.py --list            # list input devices
-    .venv/bin/python stream_system_audio.py --device "MacBook Pro Microphone"
+    .venv/bin/python stream_system_audio.py --device "MacBook Pro Microphone"   # mic to use
 """
 import argparse
 import asyncio
@@ -26,6 +27,7 @@ import certifi
 import sounddevice as sd
 import websockets
 
+from inputs import Inputs
 from recording import RECORDINGS_DIR, Recording, cleanup_partials
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -33,7 +35,8 @@ HELPER_SRC = os.path.join(HERE, "syscap.swift")
 HELPER_BIN = os.path.join(HERE, "syscap")
 UI_SRCS = sorted(glob.glob(os.path.join(HERE, "ui", "*.swift")))
 UI_BIN = os.path.join(HERE, "overhear-ui")
-SYSTEM_RATE = 48000
+SYSTEM_RATE = 48000  # every input is captured at this rate, so they can be mixed
+LABELS = {"system": "system audio", "mic": "microphone"}
 # How long Save/Discard waits for Deepgram to finalize the audio it already heard
 DRAIN_TIMEOUT = 3
 
@@ -78,7 +81,10 @@ class UI:
     """The overhear-ui app: Home window, live caption overlay, and Replay.
 
     Python → UI (stdin):  {"type": "status" | "interim" | "final" | "error" | "ended", "text": ...}
-    UI → Python (stdout): {"type": "start" | "save" | "discard"}; EOF means the app quit.
+                          {"type": "input", "text": "mic", "on": false}  (an input failed)
+    UI → Python (stdout): {"type": "start", "system": true, "mic": false}
+                          {"type": "input", "name": "mic", "on": true}  (a toggle was clicked)
+                          {"type": "save" | "discard"}; EOF means the app quit.
     """
 
     def __init__(self, proc: asyncio.subprocess.Process):
@@ -90,22 +96,24 @@ class UI:
             UI_BIN, str(RECORDINGS_DIR),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE))
 
-    async def send(self, kind: str, text: str):
+    async def send(self, kind: str, text: str, **extra):
         if self.proc.returncode is not None:
             return
         try:
-            self.proc.stdin.write((json.dumps({"type": kind, "text": text}) + "\n").encode())
+            self.proc.stdin.write((json.dumps({"type": kind, "text": text, **extra}) + "\n").encode())
             await self.proc.stdin.drain()
         except (BrokenPipeError, ConnectionResetError):
             pass  # the app quit; next_event() notices
 
-    async def next_event(self) -> str | None:
-        """The next button the user clicked ("start", "save", "discard"), or None once the app quit."""
+    async def next_event(self) -> dict | None:
+        """The next thing the user clicked, e.g. {"type": "save"}, or None once the app quit."""
         while line := await self.proc.stdout.readline():
             try:
-                return json.loads(line)["type"]
-            except (ValueError, KeyError, TypeError):
+                event = json.loads(line)
+            except ValueError:
                 continue  # not a protocol line
+            if isinstance(event, dict) and "type" in event:
+                return event
         return None
 
     async def close(self):
@@ -133,7 +141,7 @@ async def system_audio(sample_rate: int):
 
 
 async def device_audio(device, sample_rate: int):
-    # ~100 ms chunks of 16-bit mono PCM from an input device
+    # ~20 ms chunks of 16-bit mono PCM from an input device (None: the system default)
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[bytes] = asyncio.Queue()
 
@@ -141,22 +149,25 @@ async def device_audio(device, sample_rate: int):
         loop.call_soon_threadsafe(queue.put_nowait, bytes(indata))
 
     with sd.RawInputStream(device=device, samplerate=sample_rate, channels=1,
-                           dtype="int16", blocksize=sample_rate // 10,
+                           dtype="int16", blocksize=sample_rate // 50,
                            callback=on_audio):
         while True:
             yield await queue.get()
 
 
-def audio_source(device):
-    """Picks the input once; returns (open_source, sample_rate, label).
+def make_inputs(device, on: set[str], on_failure) -> Inputs:
+    """A session's inputs: system audio from syscap, and the mic from `device`."""
+    return Inputs(SYSTEM_RATE, {
+        "system": lambda: system_audio(SYSTEM_RATE),
+        "mic": lambda: device_audio(device, SYSTEM_RATE),
+    }, on, on_failure)
 
-    Each session calls open_source() for a fresh capture, e.g. a new syscap process.
-    """
-    if device is None:
-        return lambda: system_audio(SYSTEM_RATE), SYSTEM_RATE, "system audio"
-    info = sd.query_devices(device, "input")
-    sample_rate = int(info["default_samplerate"])
-    return lambda: device_audio(device, sample_rate), sample_rate, f"'{info['name']}'"
+
+def describe(on: set[str]) -> str:
+    """E.g. {"system", "mic"} → "Listening to system audio and microphone"."""
+    if not on:
+        return "System audio and microphone are off"
+    return "Listening to " + " and ".join(LABELS[name] for name in LABELS if name in on)
 
 
 async def run(device, use_ui: bool):
@@ -164,10 +175,18 @@ async def run(device, use_ui: bool):
     if not key:
         sys.exit("Set DEEPGRAM_API_KEY (env var or .env file next to this script).")
 
-    open_source, sample_rate, label = audio_source(device)
-    print(f"Capturing {label} @ {sample_rate} Hz — Ctrl+C to stop\n")
     if not use_ui:
-        await stream(key, open_source(), sample_rate, label, no_show)
+        # Terminal only: one input, and the stream ends if it fails.
+        on = {"system"} if device is None else {"mic"}
+        stop = asyncio.Event()
+
+        async def ended(name, error):
+            print(f"\r\033[KError: {LABELS[name]} stopped: {error}")
+            stop.set()
+
+        print(f"{describe(on)} — Ctrl+C to stop\n")
+        inputs = make_inputs(device, on, ended)
+        await stream(key, inputs.chunks(), SYSTEM_RATE, describe(on), no_show, stop=stop)
         return
 
     cleanup_partials()
@@ -175,12 +194,20 @@ async def run(device, use_ui: bool):
     try:
         print("Waiting for Start in the Overhear window…")
         while (event := await ui.next_event()) is not None:
-            if event != "start":
+            if event["type"] != "start":
                 continue
-            rec = Recording(RECORDINGS_DIR, sample_rate)
+
+            async def failed(name, error):
+                print(f"\r\033[KError: {LABELS[name]} stopped: {error}")
+                await ui.send("error", f"{LABELS[name].capitalize()} stopped: {error}")
+                await ui.send("input", name, on=False)
+
+            inputs = make_inputs(device, {name for name in LABELS if event.get(name)}, failed)
+            rec = Recording(RECORDINGS_DIR, SYSTEM_RATE)
             stop = asyncio.Event()
-            await session(ui, rec, stream(key, open_source(), sample_rate, label, ui.send, rec, stop),
-                          stop)
+            capture = stream(key, inputs.chunks(), SYSTEM_RATE, describe(inputs.on), ui.send,
+                             rec, stop)
+            await session(ui, rec, capture, stop, inputs)
             print("Waiting for Start in the Overhear window…")
     finally:
         await ui.close()
@@ -190,13 +217,18 @@ async def no_show(kind: str, text: str):
     pass
 
 
-async def next_choice(ui) -> str | None:
-    while (event := await ui.next_event()) not in ("save", "discard", None):
-        pass
-    return event
+async def next_choice(ui, inputs: Inputs | None) -> str | None:
+    """Waits for Save or Discard (None if the app quit), turning inputs on and off meanwhile."""
+    while (event := await ui.next_event()) is not None:
+        if event["type"] in ("save", "discard"):
+            return event["type"]
+        if event["type"] == "input" and inputs:
+            inputs.set(event.get("name"), bool(event.get("on")))
+            await ui.send("status", describe(inputs.on))
+    return None
 
 
-async def session(ui, rec: Recording, capture, stop: asyncio.Event):
+async def session(ui, rec: Recording, capture, stop: asyncio.Event, inputs: Inputs | None = None):
     """Runs one session from Start until Save, Discard or quit, then keeps or deletes `rec`.
 
     `capture` streams audio and captions into `rec` until `stop` is set. If it fails first (network
@@ -207,7 +239,7 @@ async def session(ui, rec: Recording, capture, stop: asyncio.Event):
     the UI to go back to Home.
     """
     capture_task = asyncio.create_task(capture)
-    choice_task = asyncio.create_task(next_choice(ui))
+    choice_task = asyncio.create_task(next_choice(ui, inputs))
     choice = None
     try:
         await asyncio.wait([capture_task, choice_task], return_when=asyncio.FIRST_COMPLETED)
@@ -230,12 +262,13 @@ async def session(ui, rec: Recording, capture, stop: asyncio.Event):
             await ui.send("ended", "")
 
 
-async def stream(key, source, sample_rate, label, show, rec: Recording | None = None,
+async def stream(key, source, sample_rate, status, show, rec: Recording | None = None,
                  stop: asyncio.Event | None = None):
     """Streams audio to Deepgram and shows captions until the audio ends or `stop` is set.
 
-    With `rec`, every chunk sent and every final line also go into the recording; Deepgram's
-    line times count seconds of audio sent, so they match positions in rec's audio.
+    `source` yields (chunk, the mic heard speech). With `rec`, every chunk sent and every final
+    line also go into the recording; Deepgram's line times count seconds of audio sent, so they
+    match positions in rec's audio.
     """
     await show("status", "Connecting…")
     async with websockets.connect(
@@ -244,12 +277,12 @@ async def stream(key, source, sample_rate, label, show, rec: Recording | None = 
         # python.org builds on macOS ship without system CA certs
         ssl=ssl.create_default_context(cafile=certifi.where()),
     ) as ws:
-        await show("status", f"Listening to {label}")
+        await show("status", status)
 
         async def sender():
-            async for chunk in source:
+            async for chunk, mic in source:
                 if rec:
-                    rec.write(chunk)
+                    rec.write(chunk, mic)
                 await ws.send(chunk)
             # Audio source ended (e.g. helper exited) — stop the session
             await show("error", "Audio capture stopped")
@@ -301,8 +334,8 @@ async def close_stream(ws):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--device",
-                   help="capture this input device (name substring or index) "
-                        "instead of system audio")
+                   help="microphone to use (name substring or index; default: the system input). "
+                        "With --no-overlay, captions it instead of system audio")
     p.add_argument("--list", action="store_true", help="list audio devices and exit")
     p.add_argument("--no-overlay", action="store_true",
                    help="terminal only: no app window and no recording")
@@ -311,10 +344,10 @@ def main():
         print(sd.query_devices())
         return
     device = args.device
-    if device is None:
-        build_helper([HELPER_SRC], HELPER_BIN)
-    elif device.isdigit():
+    if device is not None and device.isdigit():
         device = int(device)
+    if device is None or not args.no_overlay:
+        build_helper([HELPER_SRC], HELPER_BIN)
     if not args.no_overlay:
         build_helper(UI_SRCS, UI_BIN)
     try:

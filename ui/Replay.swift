@@ -1,5 +1,6 @@
 // Replays a saved recording with its captions in lockstep: the line being spoken is highlighted
-// and kept in view, and clicking any line plays the audio from there.
+// and kept in view, and clicking any line plays the audio from there. A mic icon marks the lines
+// the user spoke in.
 import AppKit
 import AVFoundation
 
@@ -36,7 +37,11 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         let timeColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("time"))
         timeColumn.width = 64
         timeColumn.resizingMask = []
+        let micColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("mic"))
+        micColumn.width = 18
+        micColumn.resizingMask = []
         table.addTableColumn(timeColumn)
+        table.addTableColumn(micColumn)
         table.addTableColumn(textColumn)
         table.headerView = nil
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
@@ -194,6 +199,15 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
 
     func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
         guard let id = column?.identifier else { return nil }
+        if id.rawValue == "mic" {
+            guard lines[row].mic == true else { return nil }
+            let icon = tableView.makeView(withIdentifier: id, owner: self) as? NSImageView
+                ?? NSImageView(image: NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "You spoke")!)
+            icon.identifier = id
+            icon.contentTintColor = .systemOrange  // stays visible on the highlighted row
+            icon.toolTip = "Your microphone heard speech in this line"
+            return icon
+        }
         let cell = tableView.makeView(withIdentifier: id, owner: self) as? NSTextField
             ?? NSTextField(wrappingLabelWithString: "")
         cell.identifier = id

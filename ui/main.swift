@@ -5,7 +5,10 @@
 //   overhear-ui <recordings_dir>
 //
 //   stdin  (from Python): {"type": "status" | "interim" | "final" | "error" | "ended", "text": "..."}
-//   stdout (to Python):   {"type": "start" | "save" | "discard"}
+//                         {"type": "input", "text": "mic", "on": false}   (an input failed)
+//   stdout (to Python):   {"type": "start", "system": true, "mic": false}
+//                         {"type": "input", "name": "mic", "on": true}    (a toggle was clicked)
+//                         {"type": "save" | "discard"}
 //
 // Quits when stdin closes. Python reads our exit (stdout EOF) as "the user quit".
 import AppKit
@@ -18,11 +21,13 @@ let recordingsDir = URL(fileURLWithPath: CommandLine.arguments.count > 1
 struct Message: Decodable {
     let type: String
     let text: String
+    let on: Bool?  // "input" only
 }
 
-/// Tells Python which button the user clicked, e.g. {"type":"save"}.
-func emit(_ type: String) {
-    try? FileHandle.standardOutput.write(contentsOf: Data("{\"type\":\"\(type)\"}\n".utf8))
+/// Tells Python what the user did, e.g. emit("input", ["name": "mic", "on": true]).
+func emit(_ type: String, _ fields: [String: Any] = [:]) {
+    guard let data = try? JSONSerialization.data(withJSONObject: fields.merging(["type": type]) { $1 }) else { return }
+    try? FileHandle.standardOutput.write(contentsOf: data + Data("\n".utf8))
 }
 
 /// Lets NSCursor.set() take effect while the app is inactive, which it is whenever the overlay
@@ -73,20 +78,23 @@ let overlay = Overlay()
 let replay = Replay()
 let home = Home(recordingsDir: recordingsDir)
 
-// ⌥⇧R starts a session; ⌥⇧S and ⌥⇧D end it. Each is live only when it can do something.
+// ⌥⇧R starts a session; ⌥⇧M toggles the mic during it; ⌥⇧S and ⌥⇧D end it. Each is live only
+// when it can do something.
 let startKey = HotKey(kVK_ANSI_R) { home.start() }
-let saveKey = HotKey(kVK_ANSI_S) { overlay.save() }
-let discardKey = HotKey(kVK_ANSI_D) { overlay.discard() }
+let sessionKeys = [
+    HotKey(kVK_ANSI_M) { overlay.toggleMic() },
+    HotKey(kVK_ANSI_S) { overlay.save() },
+    HotKey(kVK_ANSI_D) { overlay.discard() },
+]
 func setLive(_ live: Bool) {
     startKey.isEnabled = !live
-    saveKey.isEnabled = live
-    discardKey.isEnabled = live
+    sessionKeys.forEach { $0.isEnabled = live }
 }
 
 home.onStart = {
     replay.close()  // its audio would be captured and captioned too
     setLive(true)
-    emit("start")
+    emit("start", overlay.inputs)
     overlay.begin()
 }
 home.onOpen = { replay.open($0) }

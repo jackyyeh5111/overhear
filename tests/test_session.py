@@ -9,21 +9,24 @@ SECOND = bytes(RATE * 2)
 
 
 class FakeUI:
-    """Scripted clicks in, recorded messages out; next_event() returns None after the script."""
+    """Scripted clicks in, recorded messages out; None in the script means the app quit.
 
-    def __init__(self, *events: str | None):
+    A click is a type ("save") or a whole event ({"type": "input", "name": "mic", "on": True}).
+    """
+
+    def __init__(self, *events: str | dict | None):
         self.events: asyncio.Queue = asyncio.Queue()
         for e in events:
-            self.events.put_nowait(e)
+            self.click(e)
         self.sent: list[tuple[str, str]] = []
 
-    def click(self, event: str | None):
-        self.events.put_nowait(event)
+    def click(self, event: str | dict | None):
+        self.events.put_nowait({"type": event} if isinstance(event, str) else event)
 
     async def next_event(self):
         return await self.events.get()
 
-    async def send(self, kind, text):
+    async def send(self, kind, text, **extra):
         self.sent.append((kind, text))
 
 
@@ -119,3 +122,25 @@ def test_stop_drains_last_lines_into_recording(tmp_path):
     [path] = saved(tmp_path)
     lines = json.loads((path / "captions.json").read_text())["lines"]
     assert lines[-1]["text"] == "the last sentence"
+
+
+class FakeInputs:
+    def __init__(self):
+        self.on = {"system"}
+
+    def set(self, name, on):
+        (self.on.add if on else self.on.discard)(name)
+
+
+def test_toggles_reach_inputs_during_session(tmp_path):
+    ui = FakeUI({"type": "input", "name": "mic", "on": True},
+                {"type": "input", "name": "system", "on": False}, "save")
+    inputs = FakeInputs()
+
+    async def go():
+        rec = Recording(tmp_path, RATE)
+        stop = asyncio.Event()
+        await session(ui, rec, capture(rec, stop), stop, inputs)
+    asyncio.run(go())
+    assert inputs.on == {"mic"}
+    assert ("status", "Listening to microphone") in ui.sent

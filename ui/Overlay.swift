@@ -1,5 +1,6 @@
 // Floating transcript overlay for a live session: a transparent, always-on-top panel that never
-// takes focus and stays visible over full-screen apps. Save and Discard end the session.
+// takes focus and stays visible over full-screen apps. Toggles turn the mic and system audio on
+// and off; Save and Discard end the session.
 import AppKit
 
 let historyLimit = 50
@@ -7,6 +8,11 @@ let defaultFontSize: CGFloat = 22
 let fontSizes: ClosedRange<CGFloat> = 12...48
 let opacitySteps: [CGFloat] = [0.35, 0.55, 0.75, 0.9]
 let defaultSize = NSSize(width: 640, height: 200)
+// Toolbar look of each input toggle, keyed by the name Python knows it by.
+let inputLooks: [(name: String, on: String, off: String, label: String, shortcut: String?)] = [
+    ("mic", "mic", "mic.slash", "microphone", "⌥⇧M"),
+    ("system", "speaker.wave.2", "speaker.slash", "system audio", nil),
+]
 let minSize = NSSize(width: 280, height: 80)
 
 final class OverlayPanel: NSPanel {
@@ -129,6 +135,7 @@ final class Overlay: NSObject, NSWindowDelegate {
     private let bannerIcon = NSImageView()
     private let bannerSpinner = NSProgressIndicator()
     private let bannerText = NSTextField(labelWithString: "")
+    private var inputButtons: [String: ToolButton] = [:]
     private var lockButton: ToolButton!
     private var saveButton: ToolButton!
     private var discardButton: ToolButton!
@@ -138,8 +145,14 @@ final class Overlay: NSObject, NSWindowDelegate {
     private var status = ""
     private var armed: ToolButton?  // Save or Discard, waiting for its confirming second click / press
     private var armTimer: Timer?
+    private var flashTimer: Timer?  // hides a short-lived banner, e.g. "Microphone off"
     private var shownError = false
     private var locked = false
+    // Remembered between runs; the first run captures system audio only.
+    private(set) var inputs: [String: Bool] = [
+        "system": defaults.object(forKey: "input.system") as? Bool ?? true,
+        "mic": defaults.bool(forKey: "input.mic"),
+    ]
     private var fontSize = CGFloat(defaults.object(forKey: "fontSize") as? Double ?? Double(defaultFontSize))
     private var opacity = CGFloat(defaults.object(forKey: "opacity") as? Double ?? Double(opacitySteps[1]))
 
@@ -186,6 +199,14 @@ final class Overlay: NSObject, NSWindowDelegate {
         text.isSelectable = false
         scroll.documentView = text
 
+        for look in inputLooks {
+            let b = button(look.on, look.label, #selector(toggleInput))
+            b.identifier = NSUserInterfaceItemIdentifier(look.name)
+            inputButtons[look.name] = b
+            toolbar.addArrangedSubview(b)
+            showInput(look.name)
+        }
+        toolbar.setCustomSpacing(18, after: toolbar.arrangedSubviews.last!)
         lockButton = button("lock.open", "Lock (click-through)", #selector(toggleLock))
         saveButton = button("square.and.arrow.down", "Save recording  ⌥⇧S", #selector(save))
         discardButton = button("trash", "Discard recording  ⌥⇧D", #selector(discard))
@@ -268,10 +289,13 @@ final class Overlay: NSObject, NSWindowDelegate {
                       width: defaultSize.width, height: defaultSize.height)
     }
 
-    private func button(_ symbol: String, _ label: String, _ action: Selector) -> ToolButton {
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)!
+    private func symbol(_ name: String, _ label: String) -> NSImage {
+        NSImage(systemSymbolName: name, accessibilityDescription: label)!
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .medium))!
-        let b = ToolButton(image: image, target: self, action: action)
+    }
+
+    private func button(_ name: String, _ label: String, _ action: Selector) -> ToolButton {
+        let b = ToolButton(image: symbol(name, label), target: self, action: action)
         b.isBordered = false
         b.contentTintColor = .white
         b.hint = label
@@ -343,6 +367,8 @@ final class Overlay: NSObject, NSWindowDelegate {
 
     /// Shows `message` in the banner after `icon`, or after a spinner when there is no icon.
     private func showBanner(_ message: String, icon: NSImage? = nil, color: NSColor = .white) {
+        flashTimer?.invalidate()  // whatever shows now stays until it's done
+        flashTimer = nil
         bannerText.stringValue = message
         bannerIcon.image = icon
         bannerIcon.contentTintColor = color
@@ -352,7 +378,18 @@ final class Overlay: NSObject, NSWindowDelegate {
         setBannerHidden(false)
     }
 
+    /// Shows `message` for 1.5 seconds, unless a confirm prompt or "Saving…" is showing.
+    private func flashBanner(_ message: String, icon: NSImage?) {
+        guard armed == nil, saveButton.isEnabled else { return }
+        showBanner(message, icon: icon)
+        flashTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
+            self?.hideBanner()
+        }
+    }
+
     private func hideBanner() {
+        flashTimer?.invalidate()
+        flashTimer = nil
         bannerSpinner.stopAnimation(nil)
         setBannerHidden(true)
     }
@@ -385,6 +422,8 @@ final class Overlay: NSObject, NSWindowDelegate {
         case "error":
             shownError = true
             append(message.text, isError: true)
+        case "input":
+            if let on = message.on { setInput(message.text, on: on) }
         default:
             return
         }
@@ -455,11 +494,45 @@ final class Overlay: NSObject, NSWindowDelegate {
         render()
     }
 
+    @objc private func toggleInput(_ sender: ToolButton) {
+        guard let name = sender.identifier?.rawValue else { return }
+        toggle(name)
+    }
+
+    /// ⌥⇧M. The toolbar is likely hidden (the pointer is in another app), so the banner says
+    /// what happened. Ignored once Save or Discard has been sent, like those shortcuts.
+    func toggleMic() {
+        guard saveButton.isEnabled else { return }
+        toggle("mic")
+        let on = inputs["mic"] ?? false
+        flashBanner(on ? "Microphone on" : "Microphone off", icon: inputButtons["mic"]?.image)
+    }
+
+    private func toggle(_ name: String) {
+        let on = !(inputs[name] ?? false)
+        setInput(name, on: on)
+        emit("input", ["name": name, "on": on])
+    }
+
+    private func setInput(_ name: String, on: Bool) {
+        guard inputButtons[name] != nil else { return }
+        inputs[name] = on
+        defaults.set(on, forKey: "input.\(name)")
+        showInput(name)
+    }
+
+    /// Slashed and dimmed while off; the hint says what a click does.
+    private func showInput(_ name: String) {
+        guard let b = inputButtons[name], let look = inputLooks.first(where: { $0.name == name }) else { return }
+        let on = inputs[name] ?? false
+        b.image = symbol(on ? look.on : look.off, look.label)
+        b.contentTintColor = on ? .white : NSColor.white.withAlphaComponent(0.45)
+        b.hint = "Turn \(look.label) \(on ? "off" : "on")" + (look.shortcut.map { "  \($0)" } ?? "")
+    }
+
     @objc private func toggleLock() {
         locked.toggle()
-        lockButton.image = NSImage(systemSymbolName: locked ? "lock" : "lock.open",
-                                   accessibilityDescription: "Lock")!
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .medium))
+        lockButton.image = symbol(locked ? "lock" : "lock.open", "Lock")
         lockButton.hint = locked ? "Unlock" : "Lock (click-through)"
         for view in toolbar.arrangedSubviews where view !== lockButton { view.isHidden = locked }
         if !locked { panel.ignoresMouseEvents = false }

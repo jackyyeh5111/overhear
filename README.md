@@ -1,10 +1,11 @@
 # Overhear
 
-Live captions for everything your Mac plays. Overhear captures system audio (meetings, videos,
-podcasts, anything coming out of the speakers), streams it to [Deepgram](https://deepgram.com)'s
-real-time speech-to-text API, and shows the transcript in a floating, transparent window that stays
-on top of every app, including full-screen ones. Sessions can be saved and replayed later, with the
-captions following the audio line by line.
+Live captions for everything your Mac plays, and for you. Overhear captures system audio (meetings,
+videos, podcasts, anything coming out of the speakers) and, when you turn it on, your microphone.
+It streams them to [Deepgram](https://deepgram.com)'s real-time speech-to-text API and shows the
+transcript in a floating, transparent window that stays on top of every app, including full-screen
+ones. Sessions can be saved and replayed later, with the captions following the audio line by line
+and the lines you spoke marked.
 
 No virtual audio device (BlackHole, iShowU, Loopback…) is needed: audio is captured directly with
 Apple's ScreenCaptureKit.
@@ -12,11 +13,12 @@ Apple's ScreenCaptureKit.
 ## How it works
 
 ```
- system audio ──► syscap ──PCM──► stream_system_audio.py ──WebSocket──► Deepgram (nova-3)
-                                     │         ▲
-                     captions (stdin)│         │clicks: start / save / discard (stdout)
-                                     ▼         │
-                                  overhear-ui (Home · caption overlay · Replay)
+ system audio ──► syscap ──PCM──┐
+                                ├─► mixed in stream_system_audio.py ──WebSocket──► Deepgram (nova-3)
+ microphone ──► sounddevice ────┘         │         ▲
+                         captions (stdin) │         │ clicks: start / toggles / save / discard
+                                          ▼         │ (stdout)
+                                       overhear-ui (Home · caption overlay · Replay)
 
  Save ──► ~/Library/Application Support/Overhear/recordings/<date>/{audio.m4a, captions.json}
 ```
@@ -25,8 +27,9 @@ Apple's ScreenCaptureKit.
 | --- | --- |
 | `syscap.swift` | Captures system audio with ScreenCaptureKit and writes raw 16-bit mono PCM to stdout. |
 | `ui/` | The `overhear-ui` app: a Home window (Run live captioning, recordings list), the transparent always-on-top caption overlay, and the Replay window. |
+| `inputs.py` | Mixes whichever inputs are on (system audio, mic) into one steady stream, and notes when the mic hears speech. |
 | `recording.py` | Writes one session to disk: the exact audio sent to Deepgram plus its final captions. |
-| `stream_system_audio.py` | The main program: starts `overhear-ui`, and for each session runs `syscap`, streams the audio to Deepgram, prints transcripts in the terminal, forwards them to the overlay, and saves or discards the recording. |
+| `stream_system_audio.py` | The main program: starts `overhear-ui`, and for each session captures the inputs, streams the mix to Deepgram, prints transcripts in the terminal, forwards them to the overlay, and saves or discards the recording. |
 
 ## Requirements
 
@@ -65,7 +68,11 @@ On first run, the script compiles the `syscap` and `overhear-ui` helpers with `s
 them whenever their `.swift` sources change. The **Overhear** window opens:
 
 1. Click **Run live captioning** (or press **⌥⇧R** in any app). The window hides, the floating
-   overlay appears, and captions show up there and in the terminal as audio plays.
+   overlay appears, and captions show up there and in the terminal as audio plays. Use the
+   **microphone** and **system audio** toggles at the left of the overlay toolbar to turn each
+   input on or off at any time (**⌥⇧M** toggles the mic from any app, and the overlay briefly
+   shows "Microphone on" or "off"); the choice is remembered for the next session (the first one
+   starts with system audio only).
 2. End the session from the overlay toolbar with **Save** or **Discard**, or press **⌥⇧S** /
    **⌥⇧D** in any app. Both ask you to confirm with a second click or press within 3 seconds.
    Either way you return to the Overhear window.
@@ -78,17 +85,23 @@ Close the Overhear window, press **⌘Q**, or press **Ctrl+C** in the terminal t
 
 The first time, macOS asks for **Screen & System Audio Recording** permission for your terminal
 app. Grant it in *System Settings → Privacy & Security → Screen & System Audio Recording*, then
-restart the terminal.
+restart the terminal. The first time you turn the mic on, macOS also asks for **Microphone**
+permission for the terminal.
+
+With both inputs on, wear headphones: otherwise the mic also hears the speakers, which doubles
+that audio in the transcript and can mark lines as yours that weren't.
 
 ### Options
 
 ```sh
-.venv/bin/python stream_system_audio.py --no-overlay       # terminal only: no windows, no recording
+.venv/bin/python stream_system_audio.py --no-overlay       # terminal only: system audio, no recording
 .venv/bin/python stream_system_audio.py --list             # list audio input devices
-.venv/bin/python stream_system_audio.py --device "MacBook Pro Microphone"   # transcribe a mic instead
+.venv/bin/python stream_system_audio.py --device "MacBook Pro Microphone"   # which mic to use
 ```
 
-`--device` accepts a name substring or the index shown by `--list`.
+`--device` picks the microphone behind the overlay's mic toggle (default: the system input device).
+It accepts a name substring or the index shown by `--list`. With `--no-overlay`, it captions that
+mic instead of system audio.
 
 Deepgram settings (`nova-3`, English, interim results, smart formatting) are set in `build_url()`
 in `stream_system_audio.py`.
@@ -96,8 +109,12 @@ in `stream_system_audio.py`.
 ### The overlay window
 
 - **Move** it by dragging anywhere inside; **resize** it by dragging its border.
-- Toolbar buttons (hover one to see its name): smaller/larger text, cycle background opacity, clear the screen, **lock** (makes
-  the window click-through, so it never gets in the way), **Save** and **Discard**.
+- Toolbar buttons (hover one to see its name): **microphone** and **system audio** on/off
+  (slashed while off), smaller/larger text, cycle background opacity, clear the screen, **lock**
+  (makes the window click-through, so it never gets in the way), **Save** and **Discard**.
+- Whatever is on is mixed into one transcript. With both off the session keeps running silently,
+  so you can turn an input back on without starting over. If an input fails (say, the mic is
+  unplugged), the error shows in red and its toggle turns off.
 - It never takes keyboard focus. Position, size, font size and opacity are remembered between runs.
 - Interim (in-progress) text is shown until Deepgram finalizes it. The last 50 lines are shown;
   a saved recording keeps every line.
@@ -110,11 +127,13 @@ Each saved session is a folder in `~/Library/Application Support/Overhear/record
 2026-10-09_14-30-05/
   audio.m4a       the audio Deepgram heard, as AAC (about 30 MB per hour)
   captions.json   {"name": "recording3", "started_at": "...", "duration": 3612.4,
-                   "lines": [{"start": 0.84, "end": 4.1, "text": "..."}, ...]}
+                   "lines": [{"start": 0.84, "end": 4.1, "text": "..."},
+                             {"start": 4.3, "end": 6.0, "text": "...", "mic": true}, ...]}
 ```
 
 Line times come from Deepgram and are positions in `audio.m4a`, which is what keeps Replay in
-step. While recording, audio goes to a WAV in the hidden `.partial/` folder; it's converted on
+step. `"mic": true` marks a line during which the mic heard at least 0.3 s of speech-level sound,
+i.e. you were (also) talking. While recording, audio goes to a WAV in the hidden `.partial/` folder; it's converted on
 save (if conversion fails, `audio.wav` is kept instead).
 
 - If something fails mid-session (network, audio capture), the error shows in red and Save /
@@ -125,7 +144,7 @@ save (if conversion fails, `audio.wav` is kept instead).
 
 In **Replay**, the line being spoken is highlighted and kept in view (scrolling by hand pauses
 that for a few seconds). Click any line to play from there. **Space** plays and pauses, and the
-slider seeks.
+slider seeks. An orange mic icon marks the lines you spoke in, so you can jump straight to them.
 
 ## Running the helpers on their own
 
@@ -162,14 +181,17 @@ and quits when stdin closes:
 
 ```json
 {"type": "status" | "interim" | "final" | "error" | "ended", "text": "..."}
+{"type": "input", "text": "mic" | "system", "on": false}
 ```
 
 `final` lines are added to the overlay. `interim` replaces the line still in progress. `status` and
-`error` show a message (errors in red). `ended` hides the overlay and brings back the Overhear
-window, once a saved or discarded session has been handled.
+`error` show a message (errors in red). `input` sets a toggle (Python turns one off when that input
+fails). `ended` hides the overlay and brings back the Overhear window, once a saved or discarded
+session has been handled.
 
-It writes the user's clicks to stdout, one per line: `{"type": "start"}`, `{"type": "save"}` or
-`{"type": "discard"}`. To try it by hand, click Run live captioning, then:
+It writes the user's clicks to stdout, one per line: `{"type": "start", "system": true, "mic":
+false}` (with the toggles' state), `{"type": "input", "name": "mic", "on": true}`,
+`{"type": "save"}` or `{"type": "discard"}`. To try it by hand, click Run live captioning, then:
 
 ```sh
 (sleep 5; printf '%s\n' '{"type":"status","text":"Hello"}' '{"type":"final","text":"Overhear works."}'; sleep 30) \
@@ -182,5 +204,6 @@ It writes the user's clicks to stdout, one per line: `{"type": "start"}`, `{"typ
 uv run --with pytest pytest
 ```
 
-The tests cover `recording.py` and the session lifecycle (Save, Discard, failures, quitting) with a
-fake UI and capture, so they need no network or Deepgram key.
+The tests cover `recording.py`, the input mixer, streaming (against a fake Deepgram socket) and the
+session lifecycle (Save, Discard, toggles, failures, quitting) with a fake UI and capture, so they
+need no network, audio devices or Deepgram key.

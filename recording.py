@@ -4,9 +4,11 @@ While recording, everything lives in `<root>/.partial/<stamp>/`. Saving converts
 and moves the folder to `<root>/<stamp>/`:
 
     <stamp>/audio.m4a       the exact audio Deepgram heard (audio.wav if conversion failed)
-    <stamp>/captions.json   {"name", "started_at", "duration", "lines": [{"start", "end", "text"}, ...]}
+    <stamp>/captions.json   {"name", "started_at", "duration",
+                             "lines": [{"start", "end", "text", "mic"?}, ...]}
 
-The name defaults to "recording<N>"; the app can rename it later.
+The name defaults to "recording<N>"; the app can rename it later. A line has "mic": true when the
+microphone heard speech during it, i.e. it's (partly) the user talking.
 
 Line times come straight from Deepgram, which counts seconds of audio received, so they are
 positions in audio.m4a. That's what keeps replay in lockstep.
@@ -23,6 +25,8 @@ from pathlib import Path
 RECORDINGS_DIR = Path.home() / "Library" / "Application Support" / "Overhear" / "recordings"
 PARTIAL = ".partial"
 MIN_KEEP_SECONDS = 3
+# How much mic speech a line needs before it's marked as the user talking. A short "yes" counts.
+MIC_LINE_SECONDS = 0.3
 
 
 def cleanup_partials(root: Path = RECORDINGS_DIR):
@@ -57,18 +61,36 @@ class Recording:
         self.dir.mkdir(parents=True)
         self.sample_rate = sample_rate
         self.lines: list[dict] = []
+        self.mic_spans: list[list[float]] = []  # [start, end] seconds where the mic heard speech
         self._frames = 0
         self._wav = wave.open(str(self.dir / "audio.wav"), "wb")
         self._wav.setnchannels(1)
         self._wav.setsampwidth(2)
         self._wav.setframerate(sample_rate)
 
-    def write(self, chunk: bytes):
+    def write(self, chunk: bytes, mic: bool = False):
+        """Appends audio; `mic` says the microphone heard speech in this chunk."""
+        start = self.duration
         self._wav.writeframes(chunk)
         self._frames += len(chunk) // 2
+        if mic:
+            if self.mic_spans and self.mic_spans[-1][1] >= start:
+                self.mic_spans[-1][1] = self.duration
+            else:
+                self.mic_spans.append([start, self.duration])
 
     def add_line(self, start: float, duration: float, text: str):
-        self.lines.append({"start": round(start, 3), "end": round(start + duration, 3), "text": text})
+        line = {"start": round(start, 3), "end": round(start + duration, 3), "text": text}
+        if self._mic_seconds(start, start + duration) >= MIC_LINE_SECONDS:
+            line["mic"] = True
+        self.lines.append(line)
+
+    def _mic_seconds(self, start: float, end: float) -> float:
+        """Seconds of mic speech between `start` and `end`.
+
+        E.g. spans [[1, 2], [5, 9]] between 1.5 and 6 → 0.5 + 1 = 1.5.
+        """
+        return sum(max(0.0, min(end, e) - max(start, s)) for s, e in self.mic_spans)
 
     @property
     def duration(self) -> float:

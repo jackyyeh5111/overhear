@@ -7,6 +7,7 @@ struct CaptionLine: Decodable {
     let start: Double
     let end: Double
     let text: String
+    let mic: Bool?  // true when the microphone heard speech in it; missing otherwise
 }
 
 struct Recording {

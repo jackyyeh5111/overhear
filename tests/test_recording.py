@@ -27,6 +27,7 @@ def test_write_produces_wav_with_right_rate_and_length(tmp_path):
 def test_add_line_stores_end_time():
     rec = Recording.__new__(Recording)
     rec.lines = []
+    rec.mic_spans = []
     rec.add_line(1.5, 2.25, "hello")
     assert rec.lines == [{"start": 1.5, "end": 3.75, "text": "hello"}]
 
@@ -117,3 +118,15 @@ def test_saved_recordings_get_increasing_names(tmp_path):
         rec.write(tone(0.2))
         names.append(json.loads((rec.save() / "captions.json").read_text())["name"])
     assert names == ["recording1", "recording2"]
+
+
+def test_lines_where_the_mic_heard_speech_are_marked(tmp_path):
+    rec = Recording(tmp_path, RATE)
+    chunk = bytes(RATE // 10 * 2)  # 100 ms
+    for i in range(30):  # mic speech from 1.0 s to 1.5 s only
+        rec.write(chunk, mic=10 <= i < 15)
+    rec.add_line(0.0, 0.9, "before")
+    rec.add_line(0.8, 1.0, "spoke")    # 0.5 s of mic speech
+    rec.add_line(1.4, 1.0, "trailing")  # only 0.1 s of it
+    lines = json.loads((rec.save() / "captions.json").read_text())["lines"]
+    assert [line.get("mic", False) for line in lines] == [False, True, False]

@@ -124,7 +124,9 @@ final class Overlay: NSObject, NSWindowDelegate {
     let panel: OverlayPanel
     private let root = RootView()
     private let scroll = NSScrollView()
-    private let text = DragTextView()
+    // TextKit 1: TextKit 2 only estimates the height of off-screen text, so when old lines drop
+    // off the top the view lands short of the bottom and auto-scroll stops following.
+    private let text = DragTextView(usingTextLayoutManager: false)
     private let toolbar = NSStackView()
     private var lockButton: NSButton!
 

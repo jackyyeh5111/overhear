@@ -1,7 +1,7 @@
-// The main window: Start a live session, or open / rename / trash a saved recording.
+// The main window: start a live session, or open / rename / trash saved recordings.
 import AppKit
 
-/// Return opens the selected recording; Delete moves it to the Trash.
+/// Return opens the selected recording; Delete moves every selected one to the Trash.
 final class RecordingsTable: NSTableView {
     var onReturn: (() -> Void)?
     var onDelete: (() -> Void)?
@@ -24,6 +24,7 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
     private let window: NSWindow
     private let table = RecordingsTable()
     private let emptyLabel = NSTextField(labelWithString: "No recordings yet")
+    private var trashButton: NSButton!
     private var recordings: [Recording] = []
 
     init(recordingsDir: URL) {
@@ -40,14 +41,24 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
         window.center()
         window.setFrameAutosaveName("Home")
 
-        let start = NSButton(title: "Start live captions", target: self, action: #selector(startClicked))
+        let start = NSButton(title: "Run live captioning", target: self, action: #selector(startClicked))
         start.image = NSImage(systemSymbolName: "record.circle", accessibilityDescription: nil)
         start.imagePosition = .imageLeading
         start.bezelStyle = .rounded
         start.controlSize = .large
 
+        let shortcut = NSTextField(labelWithString: "or press ⌥⇧R in any app")
+        shortcut.font = .systemFont(ofSize: 11)
+        shortcut.textColor = .secondaryLabelColor
+
         let heading = NSTextField(labelWithString: "Recordings")
         heading.font = .boldSystemFont(ofSize: 13)
+
+        trashButton = NSButton(image: NSImage(systemSymbolName: "trash", accessibilityDescription: "Move to Trash")!,
+                               target: self, action: #selector(trashSelected))
+        trashButton.isBordered = false
+        trashButton.toolTip = "Move selected recordings to the Trash"
+        trashButton.isEnabled = false
 
         for (id, title, width) in [("name", "Name", 280.0), ("date", "Date", 170), ("duration", "Length", 70)] {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
@@ -57,12 +68,13 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
         }
         table.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
         table.usesAlternatingRowBackgroundColors = true
+        table.allowsMultipleSelection = true  // ⌘-click, ⇧-click, ⌘A
         table.dataSource = self
         table.delegate = self
         table.target = self
         table.doubleAction = #selector(openClicked)
         table.onReturn = { [weak self] in self?.open(row: self?.table.selectedRow ?? -1) }
-        table.onDelete = { [weak self] in self?.trash(row: self?.table.selectedRow ?? -1) }
+        table.onDelete = { [weak self] in self?.trashSelected() }
         table.menu = NSMenu()
         table.menu!.addItem(NSMenuItem(title: "Rename", action: #selector(renameClicked), keyEquivalent: ""))
         table.menu!.addItem(.separator())
@@ -77,15 +89,19 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
         emptyLabel.textColor = .secondaryLabelColor
 
         let content = window.contentView!
-        for view in [start, heading, scroll, emptyLabel] {
+        for view in [start, shortcut, heading, trashButton!, scroll, emptyLabel] {
             view.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(view)
         }
         NSLayoutConstraint.activate([
             start.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
             start.centerXAnchor.constraint(equalTo: content.centerXAnchor),
-            heading.topAnchor.constraint(equalTo: start.bottomAnchor, constant: 20),
+            shortcut.topAnchor.constraint(equalTo: start.bottomAnchor, constant: 6),
+            shortcut.centerXAnchor.constraint(equalTo: content.centerXAnchor),
+            heading.topAnchor.constraint(equalTo: shortcut.bottomAnchor, constant: 16),
             heading.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+            trashButton.centerYAnchor.constraint(equalTo: heading.centerYAnchor),
+            trashButton.trailingAnchor.constraint(equalTo: scroll.trailingAnchor),
             scroll.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 8),
             scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
             scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
@@ -107,17 +123,26 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
         recordings = Recording.all(in: recordingsDir)
         table.reloadData()
         emptyLabel.isHidden = !recordings.isEmpty
+        trashButton.isEnabled = !table.selectedRowIndexes.isEmpty
     }
 
-    @objc private func startClicked() {
+    @objc private func startClicked() { start() }
+
+    /// Hides Home and starts a session (the button, or ⌥⇧R from any app).
+    func start() {
+        window.makeFirstResponder(table)  // ends a rename in progress, keeping what was typed
         window.orderOut(nil)
         onStart?()
     }
 
     @objc private func openClicked() { open(row: table.clickedRow) }
 
+    @objc private func trashSelected() { trash(rows: table.selectedRowIndexes) }
+
+    /// Like Finder: right-clicking inside the selection trashes all of it, outside just that row.
     @objc private func trashClicked() {
-        trash(row: table.clickedRow >= 0 ? table.clickedRow : table.selectedRow)
+        let row = table.clickedRow
+        trash(rows: row < 0 || table.selectedRowIndexes.contains(row) ? table.selectedRowIndexes : [row])
     }
 
     /// Turns the row's name into an editable field; Return saves, Esc cancels.
@@ -161,16 +186,22 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
         onOpen?(recordings[row])
     }
 
-    private func trash(row: Int) {
-        guard recordings.indices.contains(row) else { return }
-        do {
-            try recordings[row].moveToTrash()
-        } catch {
-            NSAlert(error: error).beginSheetModal(for: window)
+    /// Trashes as many of `rows` as it can, then reports the first failure, if any.
+    private func trash(rows: IndexSet) {
+        let doomed = rows.filter(recordings.indices.contains)
+        guard let first = doomed.first else { return }
+        var failure: Error?
+        for row in doomed {
+            do {
+                try recordings[row].moveToTrash()
+            } catch {
+                failure = failure ?? error
+            }
         }
+        if let failure { NSAlert(error: failure).beginSheetModal(for: window) }
         reload()
         if !recordings.isEmpty {
-            table.selectRowIndexes([min(row, recordings.count - 1)], byExtendingSelection: false)
+            table.selectRowIndexes([min(first, recordings.count - 1)], byExtendingSelection: false)
         }
     }
 
@@ -180,6 +211,10 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
     // MARK: Table
 
     func numberOfRows(in tableView: NSTableView) -> Int { recordings.count }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        trashButton.isEnabled = !table.selectedRowIndexes.isEmpty
+    }
 
     func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
         guard let id = column?.identifier else { return nil }

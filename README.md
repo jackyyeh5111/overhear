@@ -24,7 +24,7 @@ Apple's ScreenCaptureKit.
 | Piece | What it does |
 | --- | --- |
 | `syscap.swift` | Captures system audio with ScreenCaptureKit and writes raw 16-bit mono PCM to stdout. |
-| `ui/` | The `overhear-ui` app: a Home window (Start, recordings list), the transparent always-on-top caption overlay, and the Replay window. |
+| `ui/` | The `overhear-ui` app: a Home window (Run live captioning, recordings list), the transparent always-on-top caption overlay, and the Replay window. |
 | `recording.py` | Writes one session to disk: the exact audio sent to Deepgram plus its final captions. |
 | `stream_system_audio.py` | The main program: starts `overhear-ui`, and for each session runs `syscap`, streams the audio to Deepgram, prints transcripts in the terminal, forwards them to the overlay, and saves or discards the recording. |
 
@@ -64,13 +64,15 @@ DEEPGRAM_API_KEY=your-key
 On first run, the script compiles the `syscap` and `overhear-ui` helpers with `swiftc`. It rebuilds
 them whenever their `.swift` sources change. The **Overhear** window opens:
 
-1. Click **Start live captions**. The window hides, the floating overlay appears, and captions
-   show up there and in the terminal as audio plays.
-2. End the session from the overlay toolbar with **Save** or **Discard** (Discard asks for a
-   second click). Either way you return to the Overhear window.
+1. Click **Run live captioning** (or press **⌥⇧R** in any app). The window hides, the floating
+   overlay appears, and captions show up there and in the terminal as audio plays.
+2. End the session from the overlay toolbar with **Save** or **Discard**, or press **⌥⇧S** /
+   **⌥⇧D** in any app. Both ask you to confirm with a second click or press within 3 seconds.
+   Either way you return to the Overhear window.
 3. Saved sessions are listed newest first, named `recording1`, `recording2`, … Double-click one
    (or select it and press Return) to replay it. Right-click → *Rename* to give it a better name
-   (Return saves, Esc cancels). Press Delete or right-click → *Move to Trash* to remove it.
+   (Return saves, Esc cancels). To remove recordings, select one or more (⌘-click, ⇧-click or ⌘A)
+   and press Delete, click the trash button, or right-click → *Move to Trash*.
 
 Close the Overhear window, press **⌘Q**, or press **Ctrl+C** in the terminal to quit.
 
@@ -94,7 +96,7 @@ in `stream_system_audio.py`.
 ### The overlay window
 
 - **Move** it by dragging anywhere inside; **resize** it by dragging its border.
-- Toolbar buttons: smaller/larger text, cycle background opacity, clear the screen, **lock** (makes
+- Toolbar buttons (hover one to see its name): smaller/larger text, cycle background opacity, clear the screen, **lock** (makes
   the window click-through, so it never gets in the way), **Save** and **Discard**.
 - It never takes keyboard focus. Position, size, font size and opacity are remembered between runs.
 - Interim (in-progress) text is shown until Deepgram finalizes it. The last 50 lines are shown;
@@ -167,7 +169,7 @@ and quits when stdin closes:
 window, once a saved or discarded session has been handled.
 
 It writes the user's clicks to stdout, one per line: `{"type": "start"}`, `{"type": "save"}` or
-`{"type": "discard"}`. To try it by hand, click Start, then:
+`{"type": "discard"}`. To try it by hand, click Run live captioning, then:
 
 ```sh
 (sleep 5; printf '%s\n' '{"type":"status","text":"Hello"}' '{"type":"final","text":"Overhear works."}'; sleep 30) \

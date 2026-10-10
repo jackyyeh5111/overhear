@@ -9,6 +9,7 @@
 //
 // Quits when stdin closes. Python reads our exit (stdout EOF) as "the user quit".
 import AppKit
+import Carbon.HIToolbox  // kVK_ key codes
 
 let defaults = UserDefaults(suiteName: "com.jackyyeh.deepgram-overlay")!
 let recordingsDir = URL(fileURLWithPath: CommandLine.arguments.count > 1
@@ -50,6 +51,8 @@ func mainMenu() -> NSMenu {
                                  keyEquivalent: "q")]),
         ("File", [NSMenuItem(title: "Close Window", action: #selector(NSWindow.performClose(_:)),
                              keyEquivalent: "w")]),
+        ("Edit", [NSMenuItem(title: "Select All", action: #selector(NSResponder.selectAll(_:)),
+                             keyEquivalent: "a")]),
     ] {
         let item = NSMenuItem()
         item.submenu = NSMenu(title: title)
@@ -69,13 +72,26 @@ allowCursorInBackground()
 let overlay = Overlay()
 let replay = Replay()
 let home = Home(recordingsDir: recordingsDir)
+
+// ⌥⇧R starts a session; ⌥⇧S and ⌥⇧D end it. Each is live only when it can do something.
+let startKey = HotKey(kVK_ANSI_R) { home.start() }
+let saveKey = HotKey(kVK_ANSI_S) { overlay.save() }
+let discardKey = HotKey(kVK_ANSI_D) { overlay.discard() }
+func setLive(_ live: Bool) {
+    startKey.isEnabled = !live
+    saveKey.isEnabled = live
+    discardKey.isEnabled = live
+}
+
 home.onStart = {
     replay.close()  // its audio would be captured and captioned too
+    setLive(true)
     emit("start")
     overlay.begin()
 }
 home.onOpen = { replay.open($0) }
 home.show()
+setLive(false)
 
 Thread {
     let decoder = JSONDecoder()
@@ -83,6 +99,7 @@ Thread {
         guard let message = try? decoder.decode(Message.self, from: Data(line.utf8)) else { continue }
         DispatchQueue.main.async {
             if message.type == "ended" {
+                setLive(false)
                 overlay.hide()
                 home.show()
             } else {

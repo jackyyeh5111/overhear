@@ -107,6 +107,10 @@ final class DragTextView: NSTextView {
 }
 
 final class ToolButton: NSButton {
+    /// Shown under the toolbar on hover. Not a toolTip: those only appear in the active app, and
+    /// the overlay never makes us active.
+    var hint = ""
+
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
@@ -118,15 +122,22 @@ final class Overlay: NSObject, NSWindowDelegate {
     // off the top the view lands short of the bottom and auto-scroll stops following.
     private let text = DragTextView(usingTextLayoutManager: false)
     private let toolbar = NSStackView()
-    private var lockButton: NSButton!
-    private var saveButton: NSButton!
-    private var discardButton: NSButton!
+    private let hint = NSTextField(labelWithString: "")
+    private let hintBox = NSStackView()  // pads `hint` and gives it a background
+    // A pill under the captions for "press again to confirm" and "Saving…".
+    private let banner = NSStackView()
+    private let bannerIcon = NSImageView()
+    private let bannerSpinner = NSProgressIndicator()
+    private let bannerText = NSTextField(labelWithString: "")
+    private var lockButton: ToolButton!
+    private var saveButton: ToolButton!
+    private var discardButton: ToolButton!
 
     private var finals: [(text: String, isError: Bool)] = []
     private var draft = ""
     private var status = ""
-    private var notice = ""  // "Saving…", or the Discard confirmation prompt
-    private var discardArmed: Timer?
+    private var armed: ToolButton?  // Save or Discard, waiting for its confirming second click / press
+    private var armTimer: Timer?
     private var shownError = false
     private var locked = false
     private var fontSize = CGFloat(defaults.object(forKey: "fontSize") as? Double ?? Double(defaultFontSize))
@@ -176,8 +187,8 @@ final class Overlay: NSObject, NSWindowDelegate {
         scroll.documentView = text
 
         lockButton = button("lock.open", "Lock (click-through)", #selector(toggleLock))
-        saveButton = button("square.and.arrow.down", "Save recording", #selector(save))
-        discardButton = button("trash", "Discard recording", #selector(discard))
+        saveButton = button("square.and.arrow.down", "Save recording  ⌥⇧S", #selector(save))
+        discardButton = button("trash", "Discard recording  ⌥⇧D", #selector(discard))
         for view in [
             button("textformat.size.smaller", "Smaller text", #selector(smaller)),
             button("textformat.size.larger", "Larger text", #selector(larger)),
@@ -197,9 +208,44 @@ final class Overlay: NSObject, NSWindowDelegate {
         toolbar.isHidden = true
         toolbar.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(toolbar)
+
+        hint.font = .systemFont(ofSize: 11, weight: .medium)
+        hint.textColor = .white
+        hintBox.addArrangedSubview(hint)
+        hintBox.edgeInsets = NSEdgeInsets(top: 3, left: 6, bottom: 3, right: 6)
+        hintBox.wantsLayer = true
+        hintBox.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.6).cgColor
+        hintBox.layer?.cornerRadius = 4
+        hintBox.isHidden = true
+        hintBox.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(hintBox)
+
+        bannerIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
+        bannerSpinner.style = .spinning
+        bannerSpinner.controlSize = .small
+        bannerText.font = .systemFont(ofSize: 12, weight: .medium)
+        bannerText.textColor = .white
+        for view in [bannerIcon, bannerSpinner, bannerText] { banner.addArrangedSubview(view) }
+        banner.spacing = 6
+        banner.edgeInsets = NSEdgeInsets(top: 5, left: 10, bottom: 5, right: 12)
+        banner.appearance = NSAppearance(named: .darkAqua)  // a white spinner
+        banner.wantsLayer = true
+        banner.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.7).cgColor
+        banner.layer?.cornerRadius = 12
+        banner.layer?.borderWidth = 1
+        banner.layer?.borderColor = NSColor.white.withAlphaComponent(0.15).cgColor
+        banner.isHidden = true
+        banner.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(banner)
+
         NSLayoutConstraint.activate([
+            banner.centerXAnchor.constraint(equalTo: root.centerXAnchor),
+            banner.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -8),
+            banner.widthAnchor.constraint(lessThanOrEqualTo: root.widthAnchor, constant: -16),
             toolbar.topAnchor.constraint(equalTo: root.topAnchor, constant: 6),
             toolbar.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -6),
+            hintBox.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: 4),
+            hintBox.trailingAnchor.constraint(equalTo: toolbar.trailingAnchor),
         ])
 
         applyOpacity()
@@ -222,13 +268,13 @@ final class Overlay: NSObject, NSWindowDelegate {
                       width: defaultSize.width, height: defaultSize.height)
     }
 
-    private func button(_ symbol: String, _ label: String, _ action: Selector) -> NSButton {
+    private func button(_ symbol: String, _ label: String, _ action: Selector) -> ToolButton {
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)!
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .medium))!
         let b = ToolButton(image: image, target: self, action: action)
         b.isBordered = false
         b.contentTintColor = .white
-        b.toolTip = label
+        b.hint = label
         return b
     }
 
@@ -239,49 +285,90 @@ final class Overlay: NSObject, NSWindowDelegate {
         finals.removeAll()
         draft = ""
         status = ""
-        notice = ""
         shownError = false
         saveButton.isEnabled = true
         discardButton.isEnabled = true
-        disarmDiscard()
+        disarm()
         render()
         panel.orderFrontRegardless()
     }
 
     func hide() { panel.orderOut(nil) }
 
-    @objc private func save() { end("save", notice: "Saving…") }
-
-    // Two clicks, since one stray click next to Clear could throw away an hour of audio.
-    @objc private func discard() {
-        guard discardArmed != nil else {
-            discardButton.contentTintColor = .systemRed
-            notice = "Click Discard again to throw this recording away"
-            render()
-            discardArmed = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in
-                self?.disarmDiscard()
-                self?.render()
-            }
-            return
+    // Both take two clicks or presses in a row, since one stray click or keypress could end an
+    // hour-long session or throw it away. They also run from ⌥⇧S / ⌥⇧D, which stay live until
+    // Python answers "ended"; the disabled buttons say the choice has already been sent.
+    @objc func save() {
+        confirm(saveButton, color: .systemGreen, prompt: "Press ⌥⇧S or click Save again to save") {
+            self.end("save", progress: "Saving…")
         }
-        end("discard", notice: "Discarding…")
     }
 
-    private func disarmDiscard() {
-        discardArmed?.invalidate()
-        discardArmed = nil
-        discardButton.contentTintColor = .white
-        notice = ""
+    @objc func discard() {
+        confirm(discardButton, color: .systemRed, prompt: "Press ⌥⇧D or click Discard again to discard") {
+            self.end("discard", progress: "Discarding…")
+        }
+    }
+
+    /// The first call arms `button` for 3 seconds; a second call within that time runs `action`.
+    private func confirm(_ button: ToolButton, color: NSColor, prompt: String, action: () -> Void) {
+        guard button.isEnabled else { return }
+        guard armed === button else {
+            disarm()
+            armed = button
+            button.contentTintColor = color
+            showBanner(prompt, icon: button.image, color: color)
+            armTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in self?.disarm() }
+            return
+        }
+        action()
+    }
+
+    private func disarm() {
+        armTimer?.invalidate()
+        armTimer = nil
+        armed?.contentTintColor = .white
+        armed = nil
+        hideBanner()
     }
 
     /// Tells Python the user's choice; it answers "ended" once the recording is handled.
-    private func end(_ choice: String, notice: String) {
-        disarmDiscard()
+    private func end(_ choice: String, progress: String) {
+        disarm()
         saveButton.isEnabled = false
         discardButton.isEnabled = false
-        self.notice = notice
-        render()
+        showBanner(progress)
         emit(choice)
+    }
+
+    /// Shows `message` in the banner after `icon`, or after a spinner when there is no icon.
+    private func showBanner(_ message: String, icon: NSImage? = nil, color: NSColor = .white) {
+        bannerText.stringValue = message
+        bannerIcon.image = icon
+        bannerIcon.contentTintColor = color
+        bannerIcon.isHidden = icon == nil
+        bannerSpinner.isHidden = icon != nil
+        if icon == nil { bannerSpinner.startAnimation(nil) } else { bannerSpinner.stopAnimation(nil) }
+        setBannerHidden(false)
+    }
+
+    private func hideBanner() {
+        bannerSpinner.stopAnimation(nil)
+        setBannerHidden(true)
+    }
+
+    /// Lifts the captions above the banner while it shows, so it never covers the newest line.
+    private func setBannerHidden(_ hidden: Bool) {
+        let followed = atBottom
+        banner.isHidden = hidden
+        var frame = root.bounds.insetBy(dx: 12, dy: 10)
+        if !hidden {
+            let lift = banner.fittingSize.height + 4
+            frame.origin.y += lift
+            frame.size.height -= lift
+        }
+        scroll.frame = frame
+        if followed { text.scrollToEndOfDocument(nil) }
     }
 
     // MARK: Content
@@ -310,7 +397,7 @@ final class Overlay: NSObject, NSWindowDelegate {
     }
 
     private func render() {
-        let atBottom = scroll.contentView.bounds.maxY >= text.frame.height - 4
+        let followed = atBottom
 
         let font = NSFont.systemFont(ofSize: fontSize, weight: .medium)
         let paragraph = NSMutableParagraphStyle()
@@ -332,11 +419,13 @@ final class Overlay: NSObject, NSWindowDelegate {
         }
         if !draft.isEmpty { add(draft, NSColor.white.withAlphaComponent(0.6)) }
         if out.length == 0 && !status.isEmpty { add(status, NSColor.white.withAlphaComponent(0.45)) }
-        if !notice.isEmpty { add(notice, NSColor(red: 1, green: 0.85, blue: 0.4, alpha: 1)) }
 
         text.textStorage?.setAttributedString(out)
-        if atBottom { text.scrollRangeToVisible(NSRange(location: out.length, length: 0)) }
+        if followed { text.scrollRangeToVisible(NSRange(location: out.length, length: 0)) }
     }
+
+    /// Whether the newest line is in view, so new text should keep it there.
+    private var atBottom: Bool { scroll.contentView.bounds.maxY >= text.frame.height - 4 }
 
     private func applyOpacity() {
         root.layer?.backgroundColor = NSColor.black.withAlphaComponent(opacity).cgColor
@@ -371,18 +460,28 @@ final class Overlay: NSObject, NSWindowDelegate {
         lockButton.image = NSImage(systemSymbolName: locked ? "lock" : "lock.open",
                                    accessibilityDescription: "Lock")!
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .medium))
+        lockButton.hint = locked ? "Unlock" : "Lock (click-through)"
         for view in toolbar.arrangedSubviews where view !== lockButton { view.isHidden = locked }
         if !locked { panel.ignoresMouseEvents = false }
     }
 
     private func pollPointer() {
         let pointer = NSEvent.mouseLocation
-        toolbar.isHidden = !panel.frame.contains(pointer)
+        let inside = panel.frame.contains(pointer)
+        toolbar.isHidden = !inside
+        let hovered = inside ? toolbar.arrangedSubviews.first {
+            !$0.isHidden && screenFrame(of: $0).contains(pointer)
+        } as? ToolButton : nil
+        hint.stringValue = hovered?.hint ?? ""
+        hintBox.isHidden = hovered == nil
         if locked {
             // Click-through everywhere except the lock button, so it can still unlock.
-            let lockFrame = panel.convertToScreen(lockButton.convert(lockButton.bounds, to: nil))
-            panel.ignoresMouseEvents = !lockFrame.insetBy(dx: -6, dy: -6).contains(pointer)
+            panel.ignoresMouseEvents = !screenFrame(of: lockButton).insetBy(dx: -6, dy: -6).contains(pointer)
         }
+    }
+
+    private func screenFrame(of view: NSView) -> NSRect {
+        panel.convertToScreen(view.convert(view.bounds, to: nil))
     }
 
     /// Python is gone (stdin closed): quit, leaving any error on screen long enough to read.

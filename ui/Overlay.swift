@@ -1,23 +1,13 @@
-// Floating transcript overlay: a transparent, always-on-top panel that never takes focus and
-// stays visible over full-screen apps. Reads JSON lines from stdin and quits on EOF:
-//
-//   {"type": "status" | "interim" | "final" | "error", "text": "..."}
-//
-// Usage: overlay   (launched by stream_system_audio.py)
+// Floating transcript overlay for a live session: a transparent, always-on-top panel that never
+// takes focus and stays visible over full-screen apps. Save and Discard end the session.
 import AppKit
 
-let defaults = UserDefaults(suiteName: "com.jackyyeh.deepgram-overlay")!
 let historyLimit = 50
 let defaultFontSize: CGFloat = 22
 let fontSizes: ClosedRange<CGFloat> = 12...48
 let opacitySteps: [CGFloat] = [0.35, 0.55, 0.75, 0.9]
 let defaultSize = NSSize(width: 640, height: 200)
 let minSize = NSSize(width: 280, height: 80)
-
-struct Message: Decodable {
-    let type: String
-    let text: String
-}
 
 final class OverlayPanel: NSPanel {
     override var canBecomeKey: Bool { false }
@@ -129,10 +119,14 @@ final class Overlay: NSObject, NSWindowDelegate {
     private let text = DragTextView(usingTextLayoutManager: false)
     private let toolbar = NSStackView()
     private var lockButton: NSButton!
+    private var saveButton: NSButton!
+    private var discardButton: NSButton!
 
     private var finals: [(text: String, isError: Bool)] = []
     private var draft = ""
     private var status = ""
+    private var notice = ""  // "Saving…", or the Discard confirmation prompt
+    private var discardArmed: Timer?
     private var shownError = false
     private var locked = false
     private var fontSize = CGFloat(defaults.object(forKey: "fontSize") as? Double ?? Double(defaultFontSize))
@@ -182,14 +176,18 @@ final class Overlay: NSObject, NSWindowDelegate {
         scroll.documentView = text
 
         lockButton = button("lock.open", "Lock (click-through)", #selector(toggleLock))
+        saveButton = button("square.and.arrow.down", "Save recording", #selector(save))
+        discardButton = button("trash", "Discard recording", #selector(discard))
         for view in [
             button("textformat.size.smaller", "Smaller text", #selector(smaller)),
             button("textformat.size.larger", "Larger text", #selector(larger)),
             button("circle.lefthalf.filled", "Background opacity", #selector(cycleOpacity)),
-            button("trash", "Clear", #selector(clear)),
+            button("eraser", "Clear screen", #selector(clear)),
             lockButton!,
-            button("xmark", "Close", #selector(close)),
+            saveButton!,
+            discardButton!,
         ] { toolbar.addArrangedSubview(view) }
+        toolbar.setCustomSpacing(18, after: lockButton)
         toolbar.orientation = .horizontal
         toolbar.spacing = 10
         toolbar.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
@@ -205,7 +203,6 @@ final class Overlay: NSObject, NSWindowDelegate {
         ])
 
         applyOpacity()
-        render()
 
         // Tracking areas don't fire while the panel ignores mouse events, so poll the pointer.
         let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in self?.pollPointer() }
@@ -233,6 +230,58 @@ final class Overlay: NSObject, NSWindowDelegate {
         b.contentTintColor = .white
         b.toolTip = label
         return b
+    }
+
+    // MARK: Session
+
+    /// Shows an empty overlay for a new session, without taking focus from the app in front.
+    func begin() {
+        finals.removeAll()
+        draft = ""
+        status = ""
+        notice = ""
+        shownError = false
+        saveButton.isEnabled = true
+        discardButton.isEnabled = true
+        disarmDiscard()
+        render()
+        panel.orderFrontRegardless()
+    }
+
+    func hide() { panel.orderOut(nil) }
+
+    @objc private func save() { end("save", notice: "Saving…") }
+
+    // Two clicks, since one stray click next to Clear could throw away an hour of audio.
+    @objc private func discard() {
+        guard discardArmed != nil else {
+            discardButton.contentTintColor = .systemRed
+            notice = "Click Discard again to throw this recording away"
+            render()
+            discardArmed = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in
+                self?.disarmDiscard()
+                self?.render()
+            }
+            return
+        }
+        end("discard", notice: "Discarding…")
+    }
+
+    private func disarmDiscard() {
+        discardArmed?.invalidate()
+        discardArmed = nil
+        discardButton.contentTintColor = .white
+        notice = ""
+    }
+
+    /// Tells Python the user's choice; it answers "ended" once the recording is handled.
+    private func end(_ choice: String, notice: String) {
+        disarmDiscard()
+        saveButton.isEnabled = false
+        discardButton.isEnabled = false
+        self.notice = notice
+        render()
+        emit(choice)
     }
 
     // MARK: Content
@@ -283,6 +332,7 @@ final class Overlay: NSObject, NSWindowDelegate {
         }
         if !draft.isEmpty { add(draft, NSColor.white.withAlphaComponent(0.6)) }
         if out.length == 0 && !status.isEmpty { add(status, NSColor.white.withAlphaComponent(0.45)) }
+        if !notice.isEmpty { add(notice, NSColor(red: 1, green: 0.85, blue: 0.4, alpha: 1)) }
 
         text.textStorage?.setAttributedString(out)
         if atBottom { text.scrollRangeToVisible(NSRange(location: out.length, length: 0)) }
@@ -325,8 +375,6 @@ final class Overlay: NSObject, NSWindowDelegate {
         if !locked { panel.ignoresMouseEvents = false }
     }
 
-    @objc private func close() { exit(0) }
-
     private func pollPointer() {
         let pointer = NSEvent.mouseLocation
         toolbar.isHidden = !panel.frame.contains(pointer)
@@ -337,7 +385,7 @@ final class Overlay: NSObject, NSWindowDelegate {
         }
     }
 
-    /// stdin closed: quit, leaving any error on screen long enough to read.
+    /// Python is gone (stdin closed): quit, leaving any error on screen long enough to read.
     func finish() {
         DispatchQueue.main.asyncAfter(deadline: .now() + (shownError ? 3 : 0)) { exit(0) }
     }
@@ -351,40 +399,3 @@ final class Overlay: NSObject, NSWindowDelegate {
         defaults.set(NSStringFromRect(panel.frame), forKey: "frame")
     }
 }
-
-/// Lets NSCursor.set() take effect while the app is inactive, which this overlay always is.
-/// Uses a private WindowServer property, looked up at runtime so a missing symbol only
-/// costs the resize cursors.
-func allowCursorInBackground() {
-    typealias DefaultConnection = @convention(c) () -> Int32
-    typealias SetProperty = @convention(c) (Int32, Int32, CFString, CFTypeRef) -> Int32
-    guard let defaultSym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_CGSDefaultConnection"),
-          let setSym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGSSetConnectionProperty") else {
-        FileHandle.standardError.write("overlay: resize cursors unavailable\n".data(using: .utf8)!)
-        return
-    }
-    let connection = unsafeBitCast(defaultSym, to: DefaultConnection.self)()
-    let status = unsafeBitCast(setSym, to: SetProperty.self)(
-        connection, connection, "SetsCursorInBackground" as CFString, kCFBooleanTrue)
-    if status != 0 {
-        FileHandle.standardError.write("overlay: resize cursors unavailable (\(status))\n".data(using: .utf8)!)
-    }
-}
-
-let app = NSApplication.shared
-app.setActivationPolicy(.accessory)  // no Dock icon or menu bar
-allowCursorInBackground()
-
-let overlay = Overlay()
-overlay.panel.orderFrontRegardless()  // show without activating, so focus stays where it was
-
-Thread {
-    let decoder = JSONDecoder()
-    while let line = readLine() {
-        guard let message = try? decoder.decode(Message.self, from: Data(line.utf8)) else { continue }
-        DispatchQueue.main.async { overlay.apply(message) }
-    }
-    DispatchQueue.main.async { overlay.finish() }
-}.start()
-
-app.run()

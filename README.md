@@ -3,7 +3,8 @@
 Live captions for everything your Mac plays. Overhear captures system audio (meetings, videos,
 podcasts, anything coming out of the speakers), streams it to [Deepgram](https://deepgram.com)'s
 real-time speech-to-text API, and shows the transcript in a floating, transparent window that stays
-on top of every app, including full-screen ones.
+on top of every app, including full-screen ones. Sessions can be saved and replayed later, with the
+captions following the audio line by line.
 
 No virtual audio device (BlackHole, iShowU, Loopback…) is needed: audio is captured directly with
 Apple's ScreenCaptureKit.
@@ -12,15 +13,20 @@ Apple's ScreenCaptureKit.
 
 ```
  system audio ──► syscap ──PCM──► stream_system_audio.py ──WebSocket──► Deepgram (nova-3)
-                                          │
-                                          └──JSON lines──► overlay (floating caption window)
+                                     │         ▲
+                     captions (stdin)│         │clicks: start / save / discard (stdout)
+                                     ▼         │
+                                  overhear-ui (Home · caption overlay · Replay)
+
+ Save ──► ~/Library/Application Support/Overhear/recordings/<date>/{audio.m4a, captions.json}
 ```
 
 | Piece | What it does |
 | --- | --- |
 | `syscap.swift` | Captures system audio with ScreenCaptureKit and writes raw 16-bit mono PCM to stdout. |
-| `overlay.swift` | A transparent, always-on-top panel that shows transcripts it reads as JSON lines on stdin. |
-| `stream_system_audio.py` | The main program: runs `syscap`, streams the audio to Deepgram, prints transcripts in the terminal and forwards them to `overlay`. |
+| `ui/` | The `overhear-ui` app: a Home window (Start, recordings list), the transparent always-on-top caption overlay, and the Replay window. |
+| `recording.py` | Writes one session to disk: the exact audio sent to Deepgram plus its final captions. |
+| `stream_system_audio.py` | The main program: starts `overhear-ui`, and for each session runs `syscap`, streams the audio to Deepgram, prints transcripts in the terminal, forwards them to the overlay, and saves or discards the recording. |
 
 ## Requirements
 
@@ -55,9 +61,17 @@ DEEPGRAM_API_KEY=your-key
 .venv/bin/python stream_system_audio.py
 ```
 
-On first run, the script compiles the `syscap` and `overlay` helpers with `swiftc`. It rebuilds
-them whenever their `.swift` source changes. Play some audio and captions appear in the terminal
-and in the overlay window. Stop with **Ctrl+C**, or close the overlay window.
+On first run, the script compiles the `syscap` and `overhear-ui` helpers with `swiftc`. It rebuilds
+them whenever their `.swift` sources change. The **Overhear** window opens:
+
+1. Click **Start live captions**. The window hides, the floating overlay appears, and captions
+   show up there and in the terminal as audio plays.
+2. End the session from the overlay toolbar with **Save** or **Discard** (Discard asks for a
+   second click). Either way you return to the Overhear window.
+3. Saved sessions are listed newest first. Double-click one (or select it and press Return) to
+   replay it; press Delete or right-click → *Move to Trash* to remove it.
+
+Close the Overhear window, press **⌘Q**, or press **Ctrl+C** in the terminal to quit.
 
 The first time, macOS asks for **Screen & System Audio Recording** permission for your terminal
 app. Grant it in *System Settings → Privacy & Security → Screen & System Audio Recording*, then
@@ -66,7 +80,7 @@ restart the terminal.
 ### Options
 
 ```sh
-.venv/bin/python stream_system_audio.py --no-overlay       # terminal only, no floating window
+.venv/bin/python stream_system_audio.py --no-overlay       # terminal only: no windows, no recording
 .venv/bin/python stream_system_audio.py --list             # list audio input devices
 .venv/bin/python stream_system_audio.py --device "MacBook Pro Microphone"   # transcribe a mic instead
 ```
@@ -79,10 +93,36 @@ in `stream_system_audio.py`.
 ### The overlay window
 
 - **Move** it by dragging anywhere inside; **resize** it by dragging its border.
-- Toolbar buttons: smaller/larger text, cycle background opacity, clear, **lock** (makes the window
-  click-through, so it never gets in the way), and close.
+- Toolbar buttons: smaller/larger text, cycle background opacity, clear the screen, **lock** (makes
+  the window click-through, so it never gets in the way), **Save** and **Discard**.
 - It never takes keyboard focus. Position, size, font size and opacity are remembered between runs.
-- Interim (in-progress) text is shown until Deepgram finalizes it. The last 50 lines are kept.
+- Interim (in-progress) text is shown until Deepgram finalizes it. The last 50 lines are shown;
+  a saved recording keeps every line.
+
+### Recordings
+
+Each saved session is a folder in `~/Library/Application Support/Overhear/recordings/`:
+
+```
+2026-10-09_14-30-05/
+  audio.m4a       the audio Deepgram heard, as AAC (about 30 MB per hour)
+  captions.json   {"started_at": "...", "duration": 3612.4,
+                   "lines": [{"start": 0.84, "end": 4.1, "text": "..."}, ...]}
+```
+
+Line times come from Deepgram and are positions in `audio.m4a`, which is what keeps Replay in
+step. While recording, audio goes to a WAV in the hidden `.partial/` folder; it's converted on
+save (if conversion fails, `audio.wav` is kept instead).
+
+- If something fails mid-session (network, audio capture), the error shows in red and Save /
+  Discard still decide what happens to what was recorded so far.
+- Quitting or pressing Ctrl+C mid-session saves automatically, unless there's nothing worth
+  keeping (no captions and under 3 seconds of audio).
+- Half-written sessions left by a crash are deleted on the next launch.
+
+In **Replay**, the line being spoken is highlighted and kept in view (scrolling by hand pauses
+that for a few seconds). Click any line to play from there. **Space** plays and pauses, and the
+slider seeks.
 
 ## Running the helpers on their own
 
@@ -90,7 +130,7 @@ The Python script builds and launches both helpers for you. You can also build t
 
 ```sh
 swiftc -O -swift-version 5 -o syscap syscap.swift
-swiftc -O -swift-version 5 -o overlay overlay.swift
+swiftc -O -swift-version 5 -o overhear-ui ui/*.swift
 ```
 
 ### `syscap`
@@ -108,22 +148,36 @@ it back with [SoX](https://sox.sourceforge.net):
 play -t raw -r 16000 -e signed -b 16 -c 1 out.raw
 ```
 
-### `overlay`
+### `overhear-ui`
 
 ```sh
-./overlay
+./overhear-ui <recordings_dir>
 ```
 
-Reads one JSON object per line from stdin and quits when stdin closes:
+Lists and replays the recordings in `recordings_dir`. Reads one JSON object per line from stdin
+and quits when stdin closes:
 
 ```json
-{"type": "status" | "interim" | "final" | "error", "text": "..."}
+{"type": "status" | "interim" | "final" | "error" | "ended", "text": "..."}
 ```
 
-`final` lines are added to the history. `interim` replaces the line still in progress. `status`
-and `error` show a message (errors in red). To try it by hand:
+`final` lines are added to the overlay. `interim` replaces the line still in progress. `status` and
+`error` show a message (errors in red). `ended` hides the overlay and brings back the Overhear
+window, once a saved or discarded session has been handled.
+
+It writes the user's clicks to stdout, one per line: `{"type": "start"}`, `{"type": "save"}` or
+`{"type": "discard"}`. To try it by hand, click Start, then:
 
 ```sh
-printf '%s\n' '{"type":"status","text":"Hello"}' '{"type":"final","text":"Overhear works."}' \
-  | (cat; sleep 5) | ./overlay
+(sleep 5; printf '%s\n' '{"type":"status","text":"Hello"}' '{"type":"final","text":"Overhear works."}'; sleep 30) \
+  | ./overhear-ui /tmp/overhear-test
 ```
+
+## Tests
+
+```sh
+uv run --with pytest pytest
+```
+
+The tests cover `recording.py` and the session lifecycle (Save, Discard, failures, quitting) with a
+fake UI and capture, so they need no network or Deepgram key.

@@ -1,6 +1,7 @@
 // Saved recordings, as written by recording.py: one folder per session holding audio.m4a (or
 // audio.wav if AAC conversion failed) and captions.json. In-progress sessions live in the
-// hidden .partial folder and are never listed.
+// hidden .partial folder and are never listed. YouTube imports (youtube.py) are laid out the
+// same way in their own folder, with the video's channel and link added.
 import Foundation
 
 struct CaptionLine: Codable {
@@ -16,6 +17,8 @@ struct Recording {
     let startedAt: Date
     let duration: Double
     let lines: [CaptionLine]
+    let channel: String?  // YouTube imports only
+    let url: String?      // YouTube imports only
 
     var audioURL: URL {
         let m4a = folder.appendingPathComponent("audio.m4a")
@@ -66,6 +69,8 @@ struct Recording {
         let started_at: String
         let duration: Double
         let lines: [CaptionLine]
+        let channel: String?
+        let url: String?
     }
 
     private static func load(_ folder: URL) -> Recording? {
@@ -73,7 +78,8 @@ struct Recording {
               let file = try? JSONDecoder().decode(File.self, from: data),
               let startedAt = ISO8601DateFormatter().date(from: file.started_at) else { return nil }
         return Recording(folder: folder, name: file.name ?? folder.lastPathComponent,
-                         startedAt: startedAt, duration: file.duration, lines: file.lines)
+                         startedAt: startedAt, duration: file.duration, lines: file.lines,
+                         channel: file.channel, url: file.url)
     }
 
     private static let dateFormat: DateFormatter = {

@@ -2,13 +2,16 @@
 // a floating overlay shows live captions, and Replay plays a recording back with its captions.
 // Launched by stream_system_audio.py, which does the capturing, transcribing and saving:
 //
-//   overhear-ui <recordings_dir>
+//   overhear-ui <recordings_dir> <youtube_dir>
 //
 //   stdin  (from Python): {"type": "status" | "interim" | "final" | "error" | "ended", "text": "..."}
 //                         {"type": "input", "text": "mic", "on": false}   (an input failed)
+//                         {"type": "import" | "import_error", "text": "..."}   (a YouTube import)
+//                         {"type": "imported", "text": "Added “Title”", "folder": "<path>"}
 //   stdout (to Python):   {"type": "start", "system": true, "mic": false}
 //                         {"type": "input", "name": "mic", "on": true}    (a toggle was clicked)
 //                         {"type": "save" | "discard"}
+//                         {"type": "import", "url": "https://youtu.be/..."}
 //
 // Quits when stdin closes. Python reads our exit (stdout EOF) as "the user quit".
 import AppKit
@@ -17,11 +20,14 @@ import Carbon.HIToolbox  // kVK_ key codes
 let defaults = UserDefaults(suiteName: "com.jackyyeh.deepgram-overlay")!
 let recordingsDir = URL(fileURLWithPath: CommandLine.arguments.count > 1
                         ? CommandLine.arguments[1] : "recordings")
+let youtubeDir = URL(fileURLWithPath: CommandLine.arguments.count > 2
+                     ? CommandLine.arguments[2] : "youtube")
 
 struct Message: Decodable {
     let type: String
     let text: String
     let on: Bool?  // "input" only
+    let folder: String?  // "imported" only
 }
 
 /// Tells Python what the user did, e.g. emit("input", ["name": "mic", "on": true]).
@@ -86,7 +92,7 @@ allowCursorInBackground()
 
 let overlay = Overlay()
 let replay = Replay()
-let home = Home(recordingsDir: recordingsDir)
+let home = Home(recordingsDir: recordingsDir, youtubeDir: youtubeDir)
 
 // ⌥⇧R starts a session; ⌥⇧M toggles the mic during it; ⌥⇧S and ⌥⇧D end it. Each is live only
 // when it can do something.
@@ -108,6 +114,7 @@ home.onStart = {
     overlay.begin()
 }
 home.onOpen = { replay.open($0) }
+home.onImport = { emit("import", ["url": $0]) }
 // Home's input toggles and the overlay's are the same setting.
 home.inputs = { overlay.inputs }
 home.onInputChange = { overlay.setInput($0, on: $1) }
@@ -123,6 +130,8 @@ Thread {
                 setLive(false)
                 overlay.hide()
                 home.show()
+            } else if message.type.hasPrefix("import") {
+                home.importUpdate(message)
             } else {
                 overlay.apply(message)
             }

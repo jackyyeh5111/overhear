@@ -21,6 +21,8 @@ Apple's ScreenCaptureKit.
                                        overhear-ui (Home · caption overlay · Replay)
 
  Save ──► ~/Library/Application Support/Overhear/recordings/<date>/{audio.m4a, captions.json}
+
+ YouTube link ──► yt-dlp (audio + captions) ──► ~/Library/Application Support/Overhear/youtube/<video id>/{…}
 ```
 
 | Piece | What it does |
@@ -29,6 +31,7 @@ Apple's ScreenCaptureKit.
 | `ui/` | The `overhear-ui` app: a Home window (Start live captions, searchable recordings list), the transparent always-on-top caption overlay, and the Replay window. |
 | `inputs.py` | Mixes whichever inputs are on (system audio, mic) into one steady stream, and notes when the mic hears speech. |
 | `recording.py` | Writes one session to disk: the exact audio sent to Deepgram plus its final captions. |
+| `youtube.py` | Imports a YouTube video: downloads its audio and English captions with yt-dlp (or has Deepgram transcribe it) and saves them in the recordings' format. |
 | `stream_system_audio.py` | The main program: starts `overhear-ui`, and for each session captures the inputs, streams the mix to Deepgram, prints transcripts in the terminal, forwards them to the overlay, and saves or discards the recording. |
 
 ## Requirements
@@ -169,6 +172,29 @@ selected, as `[m:ss] text`; **Copy transcript** copies them all. A line under th
 lists these keys. An orange mic icon marks the lines you spoke in, so you can jump straight to
 them.
 
+### YouTube videos
+
+Switch Home to the **YouTube** tab, paste a link into *Paste a YouTube link…* and press Return
+or **Add**. The line under it shows the download's progress. When it's done, the video is listed
+and selected; open it in Replay like any recording. Videos have their own list, so they never mix
+with your recordings. Search, rename and trash work the same way, and you can keep using the app
+(or start live captions) while a download runs. Links pasted meanwhile wait their turn.
+
+Each video is a folder in `~/Library/Application Support/Overhear/youtube/`, named by its video ID:
+
+```
+jNQXAC9IVRw/
+  audio.m4a       YouTube's AAC audio stream, as downloaded
+  captions.json   like a recording's, named after the video, plus
+                  "source": "youtube", "url" and "channel"
+```
+
+Lines are the video's English captions: the uploader's when there are any, else YouTube's
+auto-generated ones (which have no punctuation, so the **Lines** menu can only split them by
+length). A video with neither is sent to Deepgram's prerecorded API instead. Pasting a video that's
+already there just selects it. If yt-dlp warns that it has no JavaScript runtime and a download
+fails, install [deno](https://deno.com) (`brew install deno`).
+
 ## Running the helpers on their own
 
 The Python script builds and launches both helpers for you. You can also build them yourself:
@@ -196,29 +222,33 @@ play -t raw -r 16000 -e signed -b 16 -c 1 out.raw
 ### `overhear-ui`
 
 ```sh
-./overhear-ui <recordings_dir>
+./overhear-ui <recordings_dir> <youtube_dir>
 ```
 
-Lists and replays the recordings in `recordings_dir`. Reads one JSON object per line from stdin
+Lists and replays the recordings in `recordings_dir` and the videos in `youtube_dir`. Reads one JSON object per line from stdin
 and quits when stdin closes:
 
 ```json
 {"type": "status" | "interim" | "final" | "error" | "ended", "text": "..."}
 {"type": "input", "text": "mic" | "system", "on": false}
+{"type": "import" | "import_error", "text": "..."}
+{"type": "imported", "text": "Added “Title”", "folder": "<path>"}
 ```
 
 `final` lines are added to the overlay. `interim` replaces the line still in progress. `status` and
 `error` show a message (errors in red). `input` sets a toggle (Python turns one off when that input
 fails). `ended` hides the overlay and brings back the Overhear window, once a saved or discarded
-session has been handled.
+session has been handled. `import` and `import_error` show a YouTube import's progress or failure
+under the link field; `imported` shows it's done and selects `folder` in the YouTube tab.
 
 It writes the user's clicks to stdout, one per line: `{"type": "start", "system": true, "mic":
 false}` (with the toggles' state), `{"type": "input", "name": "mic", "on": true}`,
-`{"type": "save"}` or `{"type": "discard"}`. To try it by hand, click Start live captions, then:
+`{"type": "save"}`, `{"type": "discard"}` or `{"type": "import", "url": "..."}` (a pasted
+YouTube link). To try it by hand, click Start live captions, then:
 
 ```sh
 (sleep 5; printf '%s\n' '{"type":"status","text":"Hello"}' '{"type":"final","text":"Overhear works."}'; sleep 30) \
-  | ./overhear-ui /tmp/overhear-test
+  | ./overhear-ui /tmp/overhear-test /tmp/overhear-youtube
 ```
 
 ## Tests
@@ -227,6 +257,7 @@ false}` (with the toggles' state), `{"type": "input", "name": "mic", "on": true}
 uv run --with pytest pytest
 ```
 
-The tests cover `recording.py`, the input mixer, streaming (against a fake Deepgram socket) and the
+The tests cover `recording.py`, YouTube imports (caption parsing, and importing with a fake
+yt-dlp), the input mixer, streaming (against a fake Deepgram socket) and the
 session lifecycle (Save, Discard, toggles, failures, quitting) with a fake UI and capture, so they
 need no network, audio devices or Deepgram key.

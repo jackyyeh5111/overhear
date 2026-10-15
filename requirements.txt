@@ -2,3 +2,4 @@ certifi
 sounddevice
 websockets
 pytest
+yt-dlp

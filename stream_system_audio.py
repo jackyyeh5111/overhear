@@ -29,6 +29,7 @@ import websockets
 
 from inputs import Inputs
 from recording import RECORDINGS_DIR, Recording, cleanup_partials
+from youtube import YOUTUBE_DIR, Importer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HELPER_SRC = os.path.join(HERE, "syscap.swift")
@@ -82,9 +83,12 @@ class UI:
 
     Python → UI (stdin):  {"type": "status" | "interim" | "final" | "error" | "ended", "text": ...}
                           {"type": "input", "text": "mic", "on": false}  (an input failed)
+                          {"type": "import" | "import_error", "text": ...}  (a YouTube import)
+                          {"type": "imported", "text": "Added “Title”", "folder": "<path>"}
     UI → Python (stdout): {"type": "start", "system": true, "mic": false}
                           {"type": "input", "name": "mic", "on": true}  (a toggle was clicked)
-                          {"type": "save" | "discard"}; EOF means the app quit.
+                          {"type": "save" | "discard"}
+                          {"type": "import", "url": "https://youtu.be/..."}; EOF means the app quit.
     """
 
     def __init__(self, proc: asyncio.subprocess.Process):
@@ -93,7 +97,7 @@ class UI:
     @classmethod
     async def start(cls) -> "UI":
         return cls(await asyncio.create_subprocess_exec(
-            UI_BIN, str(RECORDINGS_DIR),
+            UI_BIN, str(RECORDINGS_DIR), str(YOUTUBE_DIR),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE))
 
     async def send(self, kind: str, text: str, **extra):
@@ -190,10 +194,14 @@ async def run(device, use_ui: bool):
         return
 
     cleanup_partials()
+    cleanup_partials(YOUTUBE_DIR)
     ui = await UI.start()
+    importer = Importer(YOUTUBE_DIR, key, ui.send)
     try:
         print("Waiting for Start in the Overhear window…")
         while (event := await ui.next_event()) is not None:
+            if event["type"] == "import" and event.get("url"):
+                importer.add(event["url"])
             if event["type"] != "start":
                 continue
 
@@ -210,6 +218,7 @@ async def run(device, use_ui: bool):
             await session(ui, rec, capture, stop, inputs)
             print("Waiting for Start in the Overhear window…")
     finally:
+        await importer.close()
         await ui.close()
 
 

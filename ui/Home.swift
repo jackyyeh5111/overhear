@@ -1,5 +1,8 @@
 // The main window: start a live session, or find, open, rename and trash saved recordings.
+// A second tab does the same for imported YouTube videos, and takes links to import.
 import AppKit
+
+private let homeTabKey = "homeTab"
 
 /// Return opens the selected recording; Delete moves every selected one to the Trash.
 final class RecordingsTable: NSTableView {
@@ -69,7 +72,7 @@ final class RecordingCell: NSTableCellView {
     func show(_ recording: Recording) {
         nameField.stringValue = recording.name
         lengthField.stringValue = formatTime(recording.duration)
-        dateField.stringValue = recording.relativeTitle
+        dateField.stringValue = recording.channel.map { "\($0) · \(recording.relativeTitle)" } ?? recording.relativeTitle
         micBadge.isHidden = !recording.hasMic
         previewField.stringValue = recording.preview.map { "“\($0)”" } ?? "No captions"
     }
@@ -118,9 +121,19 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
     /// The overlay's input toggles, which these checkboxes set before a session.
     var inputs: () -> [String: Bool] = { [:] }
     var onInputChange: ((String, Bool) -> Void)?
+    /// A YouTube link to import.
+    var onImport: ((String) -> Void)?
 
     private let recordingsDir: URL
+    private let youtubeDir: URL
     private let window: NSWindow
+    private let tabs = NSSegmentedControl(labels: ["Recordings", "YouTube"], trackingMode: .selectOne,
+                                          target: nil, action: nil)
+    private let linkField = NSTextField()
+    private let importStatus = NSTextField(labelWithString: "")
+    private let importRow = NSStackView()
+    private var listBelowTabs: NSLayoutConstraint!
+    private var listBelowImport: NSLayoutConstraint!
     private let table = RecordingsTable()
     private let search = NSSearchField()
     private let emptyIcon = NSImageView()
@@ -133,8 +146,13 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
     private var shown: [Recording] = []  // `recordings` that match the search; the table's rows
     private var foldersBeforeSession: Set<URL>?  // set while a session runs, to spot what it saved
 
-    init(recordingsDir: URL) {
+    /// The folder the current tab lists.
+    private var dir: URL { onYouTube ? youtubeDir : recordingsDir }
+    private var onYouTube: Bool { tabs.selectedSegment == 1 }
+
+    init(recordingsDir: URL, youtubeDir: URL) {
         self.recordingsDir = recordingsDir
+        self.youtubeDir = youtubeDir
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 520),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
@@ -174,8 +192,25 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
         hero.spacing = 8
         hero.setCustomSpacing(14, after: shortcut)
 
-        let heading = NSTextField(labelWithString: "Recordings")
-        heading.font = .systemFont(ofSize: 15, weight: .semibold)
+        tabs.target = self
+        tabs.action = #selector(tabChanged)
+        tabs.selectedSegment = defaults.integer(forKey: homeTabKey) == 1 ? 1 : 0
+
+        linkField.placeholderString = "Paste a YouTube link…"
+        linkField.target = self
+        linkField.action = #selector(addClicked)  // Return
+        let add = NSButton(title: "Add", target: self, action: #selector(addClicked))
+        add.bezelStyle = .rounded
+        importStatus.font = .systemFont(ofSize: 11)
+        importStatus.lineBreakMode = .byTruncatingTail
+        importStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let linkRow = NSStackView(views: [linkField, add])
+        linkRow.spacing = 8
+        for view in [linkRow, importStatus] { importRow.addArrangedSubview(view) }
+        importRow.orientation = .vertical
+        importRow.alignment = .leading
+        importRow.spacing = 4
+        linkRow.widthAnchor.constraint(equalTo: importRow.widthAnchor).isActive = true
 
         search.placeholderString = "Search names and transcripts"
         search.target = self
@@ -224,30 +259,74 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
         emptyState.spacing = 6
 
         let content = window.contentView!
-        for view in [hero, heading, search, trashButton!, scroll, emptyState] {
+        for view in [hero, tabs, search, trashButton!, importRow, scroll, emptyState] {
             view.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(view)
         }
+        // The list starts below the link row on the YouTube tab, below the tabs otherwise.
+        listBelowTabs = scroll.topAnchor.constraint(equalTo: tabs.bottomAnchor, constant: 8)
+        listBelowImport = scroll.topAnchor.constraint(equalTo: importRow.bottomAnchor, constant: 8)
         NSLayoutConstraint.activate([
             hero.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
             hero.centerXAnchor.constraint(equalTo: content.centerXAnchor),
-            heading.topAnchor.constraint(equalTo: hero.bottomAnchor, constant: 26),
-            heading.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
-            search.centerYAnchor.constraint(equalTo: heading.centerYAnchor),
-            search.leadingAnchor.constraint(greaterThanOrEqualTo: heading.trailingAnchor, constant: 12),
+            tabs.topAnchor.constraint(equalTo: hero.bottomAnchor, constant: 26),
+            tabs.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+            search.centerYAnchor.constraint(equalTo: tabs.centerYAnchor),
+            search.leadingAnchor.constraint(greaterThanOrEqualTo: tabs.trailingAnchor, constant: 12),
             search.trailingAnchor.constraint(equalTo: trashButton.leadingAnchor, constant: -10),
             search.widthAnchor.constraint(equalToConstant: 230),
-            trashButton.centerYAnchor.constraint(equalTo: heading.centerYAnchor),
+            trashButton.centerYAnchor.constraint(equalTo: tabs.centerYAnchor),
             trashButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
+            importRow.topAnchor.constraint(equalTo: tabs.bottomAnchor, constant: 12),
+            importRow.leadingAnchor.constraint(equalTo: tabs.leadingAnchor),
+            importRow.trailingAnchor.constraint(equalTo: trashButton.trailingAnchor),
             // The inset table style pads its rows, so the list sits closer to the edges.
-            scroll.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 8),
             scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 6),
             scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -6),
             scroll.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -6),
             emptyState.centerXAnchor.constraint(equalTo: scroll.centerXAnchor),
             emptyState.centerYAnchor.constraint(equalTo: scroll.centerYAnchor, constant: -20),
         ])
+        showTab()
         window.initialFirstResponder = table  // not the search field, which would show a focus ring
+    }
+
+    /// Shows the link row only on the YouTube tab.
+    private func showTab() {
+        importRow.isHidden = !onYouTube
+        listBelowTabs.isActive = !onYouTube
+        listBelowImport.isActive = onYouTube
+    }
+
+    @objc private func tabChanged() {
+        defaults.set(tabs.selectedSegment, forKey: homeTabKey)
+        window.makeFirstResponder(table)  // ends a rename in progress, keeping what was typed
+        search.stringValue = ""
+        showTab()
+        recordings = Recording.all(in: dir)
+        refilter(select: [])
+    }
+
+    @objc private func addClicked() {
+        let link = linkField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !link.isEmpty else { return }
+        linkField.stringValue = ""
+        setImportStatus("Getting the video…")
+        onImport?(link)
+    }
+
+    private func setImportStatus(_ text: String, error: Bool = false) {
+        importStatus.stringValue = text
+        importStatus.textColor = error ? .systemRed : .secondaryLabelColor
+    }
+
+    /// How a YouTube import is going: progress, done (then its folder is listed and selected),
+    /// or failed.
+    func importUpdate(_ message: Message) {
+        setImportStatus(message.text, error: message.type == "import_error")
+        guard message.type == "imported", onYouTube else { return }
+        recordings = Recording.all(in: dir)
+        refilter(select: Set(recordings.map(\.folder).filter { $0.path == message.folder }))
     }
 
     private func label(_ text: String) -> NSTextField {
@@ -264,8 +343,12 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
         reload()
         if let before = foldersBeforeSession {
             foldersBeforeSession = nil
-            let saved = Set(recordings.map(\.folder)).subtracting(before)  // empty after Discard
+            let saved = Set(Recording.all(in: recordingsDir).map(\.folder)).subtracting(before)  // empty after Discard
             if !saved.isEmpty {
+                if onYouTube {
+                    tabs.selectedSegment = 0  // to show what the session saved
+                    tabChanged()
+                }
                 search.stringValue = ""
                 refilter(select: saved)
             }
@@ -277,7 +360,7 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
     /// Re-reads the recordings folder, keeping the same ones selected.
     private func reload() {
         let selected = selectedFolders
-        recordings = Recording.all(in: recordingsDir)
+        recordings = Recording.all(in: dir)
         refilter(select: selected)
     }
 
@@ -292,14 +375,18 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
         trashButton.isEnabled = !rows.isEmpty
 
         emptyState.isHidden = !shown.isEmpty
-        if recordings.isEmpty {
+        if recordings.isEmpty && onYouTube {
+            emptyIcon.image = NSImage(systemSymbolName: "play.rectangle", accessibilityDescription: nil)
+            emptyTitle.stringValue = "No videos yet"
+            emptyDetail.stringValue = "Paste a YouTube link above to replay it with its transcript."
+        } else if recordings.isEmpty {
             emptyIcon.image = NSImage(systemSymbolName: "captions.bubble", accessibilityDescription: nil)
             emptyTitle.stringValue = "No recordings yet"
             emptyDetail.stringValue = "Start live captions, then press Save to keep the session here."
         } else {
             emptyIcon.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)
             emptyTitle.stringValue = "No matches"
-            emptyDetail.stringValue = "No recording is named or says “\(query)”."
+            emptyDetail.stringValue = "No \(onYouTube ? "video" : "recording") is named or says “\(query)”."
         }
     }
 
@@ -322,7 +409,7 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
     /// Hides Home and starts a session (the button, or ⌥⇧R from any app).
     func start() {
         window.makeFirstResponder(table)  // ends a rename in progress, keeping what was typed
-        foldersBeforeSession = Set(recordings.map(\.folder))
+        foldersBeforeSession = Set(Recording.all(in: recordingsDir).map(\.folder))
         window.orderOut(nil)
         onStart?()
     }
@@ -369,7 +456,7 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
                 NSAlert(error: error).beginSheetModal(for: window)
             }
         }
-        recordings = Recording.all(in: recordingsDir)
+        recordings = Recording.all(in: dir)
         refilter(select: [recording.folder])
         window.makeFirstResponder(table)
     }
@@ -392,7 +479,7 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
             }
         }
         if let failure { NSAlert(error: failure).beginSheetModal(for: window) }
-        recordings = Recording.all(in: recordingsDir)
+        recordings = Recording.all(in: dir)
         refilter(select: [])
         // Like Finder, select the row that took the first one's place.
         if !shown.isEmpty {

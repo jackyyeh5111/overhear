@@ -144,7 +144,13 @@ save (if conversion fails, `audio.wav` is kept instead).
 
 In **Replay**, the line being spoken is highlighted and kept in view (scrolling by hand pauses
 that for a few seconds). Click any line to play from there. **Space** plays and pauses, and the
-slider seeks. An orange mic icon marks the lines you spoke in, so you can jump straight to them.
+slider seeks. **←** / **→** skip back / forward by the step shown next to the clock (3 s to
+start; change it with the arrows beside it, and it's remembered). A hint above the clock shows how far you've
+skipped. **↑** / **↓** restart the line being played; pressed again within a second, they go to
+the previous / next line. **C** covers or uncovers the line being played, and **Shift+C** covers or uncovers the
+whole transcript (handy for listening first). Covered lines are shown again the next time you
+open the recording. An orange mic icon marks the
+lines you spoke in, so you can jump straight to them.
 
 ## Running the helpers on their own
 

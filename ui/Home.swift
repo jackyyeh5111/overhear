@@ -12,15 +12,20 @@ private struct Trashed {
     let url: URL
 }
 
-/// Return opens the selected recording; Delete moves every selected one to the Trash.
+/// Return opens the selected recording; Delete moves every selected one to the Trash; ← / →
+/// switch to the tab on that side.
 final class RecordingsTable: NSTableView {
     var onReturn: (() -> Void)?
     var onDelete: (() -> Void)?
+    var onArrow: ((Int) -> Void)?  // -1 for ←, 1 for →
 
     override func keyDown(with event: NSEvent) {
+        let plain = event.modifierFlags.isDisjoint(with: [.command, .option, .control])
         switch event.keyCode {
         case 36, 76: onReturn?()   // Return, keypad Enter
         case 51, 117: onDelete?()  // Delete, Forward Delete
+        case 123 where plain: onArrow?(-1)  // ←
+        case 124 where plain: onArrow?(1)   // →
         default: super.keyDown(with: event)
         }
     }
@@ -245,6 +250,7 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
         table.doubleAction = #selector(openClicked)
         table.onReturn = { [weak self] in self?.open(row: self?.table.selectedRow ?? -1) }
         table.onDelete = { [weak self] in self?.trashSelected() }
+        table.onArrow = { [weak self] step in self?.switchTab(by: step) }
         table.menu = NSMenu()
         table.menu!.addItem(NSMenuItem(title: "Rename", action: #selector(renameClicked), keyEquivalent: ""))
         table.menu!.addItem(.separator())
@@ -342,6 +348,14 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
         showTab()
         recordings = Recording.all(in: dir)
         refilter(select: [])
+    }
+
+    /// ← / → in the list: the tab to the left or right, if there is one.
+    private func switchTab(by step: Int) {
+        let tab = tabs.selectedSegment + step
+        guard (0..<tabs.segmentCount).contains(tab) else { return }
+        tabs.selectedSegment = tab
+        tabChanged()
     }
 
     @objc private func addClicked() {

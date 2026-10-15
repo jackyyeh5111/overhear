@@ -177,9 +177,10 @@ them.
 
 ### YouTube videos
 
-Switch Home to the **YouTube** tab, paste a link into *Paste a YouTube link…* and press Return
-or **Add**. The line under it shows the download's progress. When it's done, the video is listed
-and selected; open it in Replay like any recording. Videos have their own list, so they never mix
+Switch Home to the **YouTube** tab (click it, or press **→** in the list; **←** goes back), paste
+a link into *Paste a YouTube link…* and press Return or **Add**. The line under it shows the
+download's progress. When it's done, the video is listed and selected; open it in Replay like any
+recording. Videos have their own list, so they never mix
 with your recordings. Search, rename and trash work the same way, and you can keep using the app
 (or start live captions) while a download runs. Links pasted meanwhile wait their turn.
 

@@ -149,7 +149,7 @@ start; change it with the arrows beside it, and it's remembered). A hint above t
 skipped. **↑** / **↓** restart the line being played; pressed again within a second, they go to
 the previous / next line. **C** covers or uncovers the line being played, and **Shift+C** covers or uncovers the
 whole transcript (handy for listening first). Covered lines are shown again the next time you
-open the recording. An orange mic icon marks the
+open the recording. A line under the playback bar lists these keys. An orange mic icon marks the
 lines you spoke in, so you can jump straight to them.
 
 ## Running the helpers on their own

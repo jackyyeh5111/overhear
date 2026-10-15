@@ -113,6 +113,13 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
             label.setContentCompressionResistancePriority(.required, for: .horizontal)
         }
 
+        // Lists the keys handled by the monitor below; keep the two in step.
+        let keys = NSTextField(wrappingLabelWithString:
+            "Space play · ← → skip · ↑ ↓ line · C cover line · ⇧C cover all")
+        keys.font = .systemFont(ofSize: 11)
+        keys.textColor = .secondaryLabelColor
+        keys.alignment = .center
+
         // Same look as the overlay's banner.
         hintIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
         hintIcon.contentTintColor = .white
@@ -129,7 +136,7 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         hintBox.isHidden = true
 
         let content = window.contentView!
-        for view in [scroll, bar, hintBox] {
+        for view in [scroll, bar, keys, hintBox] {
             view.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(view)
         }
@@ -140,12 +147,16 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
             scroll.bottomAnchor.constraint(equalTo: bar.topAnchor),
             bar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             bar.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            bar.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            keys.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: -2),
+            keys.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+            keys.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+            keys.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -8),
             hintBox.trailingAnchor.constraint(equalTo: scroll.trailingAnchor, constant: -20),  // clear of the scroller
             hintBox.bottomAnchor.constraint(equalTo: scroll.bottomAnchor, constant: -8),
         ])
 
-        // While Replay is the key window, Space toggles playback, ← / → skip (held, they repeat),
+        // Keep in step with the hint line under the bar:
+        // while Replay is the key window, Space toggles playback, ← / → skip (held, they repeat),
         // ↑ / ↓ restart the playing line or go to the previous / next one, C covers the playing
         // line and Shift+C the whole transcript.
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in

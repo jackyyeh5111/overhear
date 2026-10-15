@@ -160,7 +160,9 @@ next to the clock, and remembered). The **Lines** menu beside it rebuilds the tr
 of about 3 to 30 seconds each, splitting long lines and merging short ones; a line ends at a
 sentence end where it can, and never runs across a pause of 2 s or more. Word times inside a line
 are estimated from its length, so a split can land a word off. *Original lines* shows Deepgram's
-lines as they were saved; the choice is remembered, and the saved recording isn't changed. **⌘F** finds text in the transcript: matches are highlighted,
+lines as they were saved; the choice is remembered, and the saved recording isn't changed.
+**⌘+** / **⌘-** make the transcript text bigger / smaller (10 to 36 pt, remembered); **⌘0** goes
+back to the default size. **⌘F** finds text in the transcript: matches are highlighted,
 Return / Shift+Return go to the next / previous one, and Esc clears the search. **⌘C** copies the
 selected lines (⌘-click or ⇧-click to select, ⌘A for all), or the playing line when none are
 selected, as `[m:ss] text`; **Copy transcript** copies them all. A line under the playback bar

@@ -5,7 +5,8 @@
 // restart the playing line, then go to the previous / next one. [ / ] change the speed. C covers
 // the playing line and Shift+C the whole transcript (press again to uncover). ⌘F finds text in
 // the transcript; ⌘C copies the selected lines (⌘-click or ⇧-click to select). The Lines menu
-// rebuilds the transcript into lines of about N seconds each (see Lines.swift).
+// rebuilds the transcript into lines of about N seconds each (see Lines.swift). ⌘+ / ⌘- make the
+// text bigger / smaller, and ⌘0 goes back to the default size.
 import AppKit
 import AVFoundation
 import Carbon.HIToolbox  // kVK_ key codes
@@ -19,6 +20,9 @@ let rateKey = "replayRate"
 let rates: [Float] = [0.75, 1, 1.25, 1.5, 2]
 let lineSecondsKey = "replayLineSeconds"
 let lineLengths: [Double] = [0, 3, 5, 8, 10, 15, 20, 30]  // seconds per line; 0 keeps Deepgram's
+let textSizeKey = "replayTextSize"
+let defaultTextSize: CGFloat = 14
+let textSizes: ClosedRange<CGFloat> = 10...36
 let findOptions: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
 
 /// A stack view that ignores the mouse, so clicks reach the views underneath.
@@ -63,6 +67,7 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
                     NSSearchFieldDelegate, AVAudioPlayerDelegate {
     private let window: NSWindow
     private let table = NSTableView()
+    private let timeColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("time"))
     private let textColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("text"))
     private let findField = NSSearchField()
     private let matchLabel = NSTextField(labelWithString: "")
@@ -78,7 +83,13 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
     private let hintBox = PassThroughStack()
     private let hintIcon = NSImageView()
     private let hintText = NSTextField(labelWithString: "")
-    private let font = NSFont.systemFont(ofSize: 14)
+    private var font: NSFont = {
+        let saved = CGFloat(defaults.object(forKey: textSizeKey) as? Double ?? Double(defaultTextSize))
+        return .systemFont(ofSize: min(max(saved, textSizes.lowerBound), textSizes.upperBound))
+    }()
+    /// The times beside the lines: 12 pt next to 14 pt text, scaled with it.
+    private var timeFont: NSFont { .monospacedDigitSystemFont(ofSize: font.pointSize * 12 / 14, weight: .regular) }
+    private var timeColumnWidth: CGFloat { ceil(52 * font.pointSize / defaultTextSize) }
 
     private var heading = ""  // "name — date", atop a copied transcript
     private var original: [CaptionLine] = []  // as saved; `lines` is these regrouped
@@ -129,8 +140,7 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         findBar.spacing = 6
         findBar.setCustomSpacing(10, after: findField)
 
-        let timeColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("time"))
-        timeColumn.width = 52
+        timeColumn.width = timeColumnWidth
         timeColumn.resizingMask = []
         let micColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("mic"))
         micColumn.width = 18
@@ -210,7 +220,7 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
 
         // Lists the keys handled by the monitor below; keep the two in step.
         let keys = NSTextField(wrappingLabelWithString:
-            "Space play · ← → skip · ↑ ↓ line · [ ] speed · C cover line · ⇧C cover all · ⌘F find · ⌘C copy")
+            "Space play · ← → skip · ↑ ↓ line · [ ] speed · C cover line · ⇧C cover all · ⌘F find · ⌘C copy · ⌘+ ⌘- text size")
         keys.font = .systemFont(ofSize: 11)
         keys.textColor = .tertiaryLabelColor
         keys.alignment = .center
@@ -272,10 +282,14 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         // while Replay is the key window, Space toggles playback, ← / → skip (held, they repeat),
         // ↑ / ↓ restart the playing line or go to the previous / next one, [ / ] change the speed,
         // C covers the playing line and Shift+C the whole transcript. Not while typing in the
-        // find field, where these keys edit the text.
+        // find field, where these keys edit the text. ⌘+ / ⌘- / ⌘0 change the text size, there too.
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, event.window === self.window,
-                  !(self.window.firstResponder is NSTextView) else { return event }
+            guard let self, event.window === self.window else { return event }
+            if let size = self.requestedTextSize(event) {
+                self.setTextSize(size)
+                return nil
+            }
+            guard !(self.window.firstResponder is NSTextView) else { return event }
             let plain = event.modifierFlags.isDisjoint(with: [.command, .option, .control])
             switch Int(event.keyCode) {
             case kVK_Space: self.togglePlay()
@@ -489,6 +503,33 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         tick()
     }
 
+    /// The size ⌘+ (or ⌘=) / ⌘- / ⌘0 ask for, or nil for any other key.
+    private func requestedTextSize(_ event: NSEvent) -> CGFloat? {
+        guard event.modifierFlags.intersection([.command, .option, .control]) == .command else { return nil }
+        switch event.charactersIgnoringModifiers {
+        case "=", "+": return font.pointSize + 2
+        case "-": return font.pointSize - 2
+        case "0": return defaultTextSize
+        default: return nil
+        }
+    }
+
+    /// Sets the transcript's text size, within `textSizes`, keeping the playing line in view, and
+    /// shows it in the corner pill (at a limit too, so the press isn't silent).
+    private func setTextSize(_ size: CGFloat) {
+        let size = min(max(size, textSizes.lowerBound), textSizes.upperBound)
+        defaults.set(Double(size), forKey: textSizeKey)
+        font = .systemFont(ofSize: size)
+        timeColumn.width = timeColumnWidth
+        table.reloadData(forRowIndexes: IndexSet(integersIn: lines.indices), columnIndexes: IndexSet(
+            [timeColumn, textColumn].map { table.column(withIdentifier: $0.identifier) }))
+        relayoutRows()
+        lastManualScroll = .distantPast
+        if current >= 0 { table.scrollRowToVisible(current) }
+        hideHint()  // ends any skip run, so the pill shows only this
+        flashHint("\(Int(size)) pt", symbol: "textformat.size")
+    }
+
     @objc private func stepChanged() {
         defaults.set(stepper.doubleValue, forKey: seekStepKey)
         showStep()
@@ -656,10 +697,10 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
             let alignRight = NSMutableParagraphStyle()
             alignRight.alignment = .right
             cell.attributedStringValue = NSAttributedString(string: formatTime(lines[row].start), attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular),
+                .font: timeFont,
                 .foregroundColor: NSColor.tertiaryLabelColor,
                 .paragraphStyle: alignRight,
-                .baselineOffset: font.ascender - NSFont.systemFont(ofSize: 12).ascender,  // level with the text
+                .baselineOffset: font.ascender - timeFont.ascender,  // level with the text
             ])
         }
         return cell

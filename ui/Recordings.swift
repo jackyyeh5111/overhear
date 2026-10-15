@@ -24,6 +24,21 @@ struct Recording {
 
     var title: String { Recording.dateFormat.string(from: startedAt) }
 
+    /// Like `title`, but "Today 9:30 AM" / "Yesterday 4:12 PM" for recent ones.
+    var relativeTitle: String { Recording.relativeDateFormat.string(from: startedAt) }
+
+    /// The first caption, for a glance at what the recording is about.
+    var preview: String? { lines.first?.text }
+
+    /// Whether the user spoke in any line.
+    var hasMic: Bool { lines.contains { $0.mic == true } }
+
+    /// Whether `query` appears in the name or anywhere in the transcript, ignoring case and accents.
+    func matches(_ query: String) -> Bool {
+        query.isEmpty || name.localizedStandardContains(query)
+            || lines.contains { $0.text.localizedStandardContains(query) }
+    }
+
     /// Every saved recording in `dir`, newest first. Folders without readable captions are skipped.
     static func all(in dir: URL) -> [Recording] {
         let folders = (try? FileManager.default.contentsOfDirectory(
@@ -65,6 +80,14 @@ struct Recording {
         let f = DateFormatter()
         f.dateStyle = .medium
         f.timeStyle = .short
+        return f
+    }()
+
+    private static let relativeDateFormat: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        f.doesRelativeDateFormatting = true
         return f
     }()
 }

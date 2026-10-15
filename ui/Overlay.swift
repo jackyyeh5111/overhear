@@ -1,24 +1,34 @@
 // Floating transcript overlay for a live session: a transparent, always-on-top panel that never
-// takes focus and stays visible over full-screen apps. Toggles turn the mic and system audio on
-// and off; Save and Discard end the session.
+// takes focus and stays visible over full-screen apps. A pill in the corner shows the session is
+// live and for how long. Toggles turn the mic and system audio on and off; Save and Discard end
+// the session.
 import AppKit
 
 let historyLimit = 50
 let defaultFontSize: CGFloat = 22
 let fontSizes: ClosedRange<CGFloat> = 12...48
-let opacitySteps: [CGFloat] = [0.35, 0.55, 0.75, 0.9]
+// How dark the tint over the blurred background is.
+let opacitySteps: [CGFloat] = [0.15, 0.35, 0.55, 0.8]
+let cornerRadius: CGFloat = 14
 let defaultSize = NSSize(width: 640, height: 200)
 // Toolbar look of each input toggle, keyed by the name Python knows it by.
 let inputLooks: [(name: String, on: String, off: String, label: String, shortcut: String?)] = [
     ("mic", "mic", "mic.slash", "microphone", "⌥⇧M"),
     ("system", "speaker.wave.2", "speaker.slash", "system audio", nil),
 ]
-let minSize = NSSize(width: 280, height: 80)
+let minSize = NSSize(width: 280, height: 100)  // room for the REC pill and two lines
 
 final class OverlayPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 }
+
+/// The frosted background. Ignores the mouse, so clicks reach RootView and move or resize.
+final class GlassView: NSVisualEffectView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
 
 struct Edges: OptionSet {
     let rawValue: Int
@@ -117,12 +127,19 @@ final class ToolButton: NSButton {
     /// the overlay never makes us active.
     var hint = ""
 
+    /// A soft square behind the button while the pointer is on it.
+    var isHovered = false {
+        didSet { layer?.backgroundColor = isHovered ? NSColor.white.withAlphaComponent(0.15).cgColor : nil }
+    }
+
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 final class Overlay: NSObject, NSWindowDelegate {
     let panel: OverlayPanel
     private let root = RootView()
+    private let glass = GlassView()
+    private let tint = NSView()  // darkens the glass by `opacity`
     private let scroll = NSScrollView()
     // TextKit 1: TextKit 2 only estimates the height of off-screen text, so when old lines drop
     // off the top the view lands short of the bottom and auto-scroll stops following.
@@ -135,6 +152,16 @@ final class Overlay: NSObject, NSWindowDelegate {
     private let bannerIcon = NSImageView()
     private let bannerSpinner = NSProgressIndicator()
     private let bannerText = NSTextField(labelWithString: "")
+    // Always on during a session: a red dot (gray while every input is off), the elapsed time,
+    // and a slashed icon for each input that's off.
+    private let pill = PassThroughStack()
+    private let dot = NSView()
+    private let elapsed = NSTextField(labelWithString: "0:00")
+    private var offIcons: [String: NSImageView] = [:]
+    private var startedAt = Date()
+    private var endedAt: Date?  // when Save or Discard was sent; the clock stops there
+    private var toolbarShown = false
+    private var hovered: ToolButton?
     private var inputButtons: [String: ToolButton] = [:]
     private var lockButton: ToolButton!
     private var saveButton: ToolButton!
@@ -168,7 +195,7 @@ final class Overlay: NSObject, NSWindowDelegate {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = false
+        panel.hasShadow = true
         panel.hidesOnDeactivate = false
         panel.minSize = minSize
         panel.acceptsMouseMovedEvents = true  // feeds RootView's resize cursors
@@ -176,8 +203,23 @@ final class Overlay: NSObject, NSWindowDelegate {
         panel.contentView = root
 
         root.wantsLayer = true
-        root.layer?.cornerRadius = 12
+        root.layer?.cornerRadius = cornerRadius
         root.layer?.masksToBounds = true
+        root.layer?.borderWidth = 1
+        root.layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
+
+        // The blur comes from the window server, which ignores layer clipping; the mask rounds it.
+        glass.frame = root.bounds
+        glass.autoresizingMask = [.width, .height]
+        glass.material = .hudWindow
+        glass.blendingMode = .behindWindow
+        glass.state = .active  // the app is never active, which would otherwise turn the blur off
+        glass.maskImage = Overlay.roundedMask()
+        tint.frame = glass.bounds
+        tint.autoresizingMask = [.width, .height]
+        tint.wantsLayer = true
+        glass.addSubview(tint)
+        root.addSubview(glass)
 
         scroll.frame = root.bounds.insetBy(dx: 12, dy: 10)
         scroll.autoresizingMask = [.width, .height]
@@ -199,6 +241,28 @@ final class Overlay: NSObject, NSWindowDelegate {
         text.isSelectable = false
         scroll.documentView = text
 
+        dot.wantsLayer = true
+        dot.layer?.cornerRadius = 3.5
+        elapsed.font = .monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+        elapsed.textColor = NSColor.white.withAlphaComponent(0.85)
+        pill.addArrangedSubview(dot)
+        pill.addArrangedSubview(elapsed)
+        for look in inputLooks {
+            let icon = NSImageView(image: NSImage(systemSymbolName: look.off,
+                                                  accessibilityDescription: "\(look.label) off")!)
+            icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold)
+            icon.contentTintColor = NSColor.white.withAlphaComponent(0.6)
+            offIcons[look.name] = icon
+            pill.addArrangedSubview(icon)
+        }
+        pill.spacing = 5
+        pill.edgeInsets = NSEdgeInsets(top: 3, left: 7, bottom: 3, right: 8)
+        pill.wantsLayer = true
+        pill.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.35).cgColor
+        pill.layer?.cornerRadius = 9
+        pill.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(pill)
+
         for look in inputLooks {
             let b = button(look.on, look.label, #selector(toggleInput))
             b.identifier = NSUserInterfaceItemIdentifier(look.name)
@@ -206,7 +270,7 @@ final class Overlay: NSObject, NSWindowDelegate {
             toolbar.addArrangedSubview(b)
             showInput(look.name)
         }
-        toolbar.setCustomSpacing(18, after: toolbar.arrangedSubviews.last!)
+        toolbar.setCustomSpacing(12, after: toolbar.arrangedSubviews.last!)
         lockButton = button("lock.open", "Lock (click-through)", #selector(toggleLock))
         saveButton = button("square.and.arrow.down", "Save recording  ⌥⇧S", #selector(save))
         discardButton = button("trash", "Discard recording  ⌥⇧D", #selector(discard))
@@ -219,14 +283,14 @@ final class Overlay: NSObject, NSWindowDelegate {
             saveButton!,
             discardButton!,
         ] { toolbar.addArrangedSubview(view) }
-        toolbar.setCustomSpacing(18, after: lockButton)
+        toolbar.setCustomSpacing(12, after: lockButton)
         toolbar.orientation = .horizontal
-        toolbar.spacing = 10
-        toolbar.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
+        toolbar.spacing = 2
+        toolbar.edgeInsets = NSEdgeInsets(top: 3, left: 4, bottom: 3, right: 4)
         toolbar.wantsLayer = true
-        toolbar.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.6).cgColor
-        toolbar.layer?.cornerRadius = 6
-        toolbar.isHidden = true
+        toolbar.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.5).cgColor
+        toolbar.layer?.cornerRadius = 8
+        toolbar.alphaValue = 0  // fades in while the pointer is over the overlay
         toolbar.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(toolbar)
 
@@ -236,7 +300,7 @@ final class Overlay: NSObject, NSWindowDelegate {
         hintBox.edgeInsets = NSEdgeInsets(top: 3, left: 6, bottom: 3, right: 6)
         hintBox.wantsLayer = true
         hintBox.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.6).cgColor
-        hintBox.layer?.cornerRadius = 4
+        hintBox.layer?.cornerRadius = 5
         hintBox.isHidden = true
         hintBox.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(hintBox)
@@ -267,9 +331,14 @@ final class Overlay: NSObject, NSWindowDelegate {
             toolbar.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -6),
             hintBox.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: 4),
             hintBox.trailingAnchor.constraint(equalTo: toolbar.trailingAnchor),
+            pill.topAnchor.constraint(equalTo: root.topAnchor, constant: 8),
+            pill.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
+            dot.widthAnchor.constraint(equalToConstant: 7),
+            dot.heightAnchor.constraint(equalToConstant: 7),
         ])
 
         applyOpacity()
+        layoutCaptions()
 
         // Tracking areas don't fire while the panel ignores mouse events, so poll the pointer.
         let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in self?.pollPointer() }
@@ -289,6 +358,20 @@ final class Overlay: NSObject, NSWindowDelegate {
                       width: defaultSize.width, height: defaultSize.height)
     }
 
+    /// A rounded rectangle that stretches to any size, keeping its corners.
+    private static func roundedMask() -> NSImage {
+        let side = cornerRadius * 2 + 1
+        let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius).fill()
+            return true
+        }
+        image.capInsets = NSEdgeInsets(top: cornerRadius, left: cornerRadius,
+                                       bottom: cornerRadius, right: cornerRadius)
+        image.resizingMode = .stretch
+        return image
+    }
+
     private func symbol(_ name: String, _ label: String) -> NSImage {
         NSImage(systemSymbolName: name, accessibilityDescription: label)!
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .medium))!
@@ -299,6 +382,12 @@ final class Overlay: NSObject, NSWindowDelegate {
         b.isBordered = false
         b.contentTintColor = .white
         b.hint = label
+        b.wantsLayer = true
+        b.layer?.cornerRadius = 5
+        NSLayoutConstraint.activate([
+            b.widthAnchor.constraint(equalToConstant: 26),
+            b.heightAnchor.constraint(equalToConstant: 22),
+        ])
         return b
     }
 
@@ -312,8 +401,12 @@ final class Overlay: NSObject, NSWindowDelegate {
         shownError = false
         saveButton.isEnabled = true
         discardButton.isEnabled = true
+        startedAt = Date()
+        endedAt = nil
         disarm()
         render()
+        updatePill()
+        updateDot()
         panel.orderFrontRegardless()
     }
 
@@ -361,6 +454,8 @@ final class Overlay: NSObject, NSWindowDelegate {
         disarm()
         saveButton.isEnabled = false
         discardButton.isEnabled = false
+        endedAt = Date()
+        updateDot()
         showBanner(progress)
         emit(choice)
     }
@@ -394,18 +489,51 @@ final class Overlay: NSObject, NSWindowDelegate {
         setBannerHidden(true)
     }
 
-    /// Lifts the captions above the banner while it shows, so it never covers the newest line.
     private func setBannerHidden(_ hidden: Bool) {
-        let followed = atBottom
         banner.isHidden = hidden
+        layoutCaptions()
+    }
+
+    /// Fits the captions below the REC pill and above the banner while it shows, so neither
+    /// covers a line, and keeps the newest line in view if it was.
+    private func layoutCaptions() {
+        let followed = atBottom
         var frame = root.bounds.insetBy(dx: 12, dy: 10)
-        if !hidden {
+        frame.size.height -= pill.fittingSize.height + 2
+        if !banner.isHidden {
             let lift = banner.fittingSize.height + 4
             frame.origin.y += lift
             frame.size.height -= lift
         }
         scroll.frame = frame
         if followed { text.scrollToEndOfDocument(nil) }
+    }
+
+    // MARK: REC pill
+
+    private func updatePill() {
+        let time = formatTime((endedAt ?? Date()).timeIntervalSince(startedAt))
+        if elapsed.stringValue != time { elapsed.stringValue = time }
+    }
+
+    /// Red and pulsing while recording something; gray and still while every input is off or
+    /// once the session is ending.
+    private func updateDot() {
+        let live = inputs.values.contains(true) && endedAt == nil
+        dot.layer?.backgroundColor = (live ? NSColor.systemRed : NSColor.white.withAlphaComponent(0.4)).cgColor
+        guard live && !reduceMotion else {
+            dot.layer?.removeAnimation(forKey: "pulse")
+            return
+        }
+        guard dot.layer?.animation(forKey: "pulse") == nil else { return }
+        let pulse = CABasicAnimation(keyPath: "opacity")
+        pulse.fromValue = 1
+        pulse.toValue = 0.3
+        pulse.duration = 0.9
+        pulse.autoreverses = true
+        pulse.repeatCount = .infinity
+        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        dot.layer?.add(pulse, forKey: "pulse")
     }
 
     // MARK: Content
@@ -447,17 +575,22 @@ final class Overlay: NSObject, NSWindowDelegate {
         shadow.shadowOffset = NSSize(width: 0, height: -1)
 
         let out = NSMutableAttributedString()
-        func add(_ line: String, _ color: NSColor) {
+        func add(_ line: String, _ color: NSColor, font: NSFont = font) {
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: font, .foregroundColor: color, .paragraphStyle: paragraph, .shadow: shadow,
             ]
             out.append(NSAttributedString(string: (out.length > 0 ? "\n" : "") + line, attributes: attrs))
         }
-        for line in finals {
-            add(line.text, line.isError ? NSColor(red: 1, green: 0.45, blue: 0.45, alpha: 1) : .white)
+        // The newest line is brightest, so the eye lands on it; in-progress text is fainter still.
+        for (i, line) in finals.enumerated() {
+            add(line.text, line.isError ? NSColor(red: 1, green: 0.45, blue: 0.45, alpha: 1)
+                : NSColor.white.withAlphaComponent(i == finals.count - 1 ? 1 : 0.75))
         }
-        if !draft.isEmpty { add(draft, NSColor.white.withAlphaComponent(0.6)) }
-        if out.length == 0 && !status.isEmpty { add(status, NSColor.white.withAlphaComponent(0.45)) }
+        if !draft.isEmpty { add(draft, NSColor.white.withAlphaComponent(0.55)) }
+        if out.length == 0 && !status.isEmpty {
+            add(status, NSColor.white.withAlphaComponent(0.5),
+                font: .systemFont(ofSize: max(fontSizes.lowerBound, fontSize * 0.7), weight: .medium))
+        }
 
         text.textStorage?.setAttributedString(out)
         if followed { text.scrollRangeToVisible(NSRange(location: out.length, length: 0)) }
@@ -467,7 +600,7 @@ final class Overlay: NSObject, NSWindowDelegate {
     private var atBottom: Bool { scroll.contentView.bounds.maxY >= text.frame.height - 4 }
 
     private func applyOpacity() {
-        root.layer?.backgroundColor = NSColor.black.withAlphaComponent(opacity).cgColor
+        tint.layer?.backgroundColor = NSColor.black.withAlphaComponent(opacity).cgColor
     }
 
     // MARK: Controls
@@ -514,20 +647,24 @@ final class Overlay: NSObject, NSWindowDelegate {
         emit("input", ["name": name, "on": on])
     }
 
-    private func setInput(_ name: String, on: Bool) {
+    /// Sets an input without telling Python: for its failure reports, and for Home's toggles
+    /// before a session (Python hears those with "start").
+    func setInput(_ name: String, on: Bool) {
         guard inputButtons[name] != nil else { return }
         inputs[name] = on
         defaults.set(on, forKey: "input.\(name)")
         showInput(name)
     }
 
-    /// Slashed and dimmed while off; the hint says what a click does.
+    /// Slashed and dimmed while off, in the toolbar and the REC pill; the hint says what a click does.
     private func showInput(_ name: String) {
         guard let b = inputButtons[name], let look = inputLooks.first(where: { $0.name == name }) else { return }
         let on = inputs[name] ?? false
         b.image = symbol(on ? look.on : look.off, look.label)
         b.contentTintColor = on ? .white : NSColor.white.withAlphaComponent(0.45)
         b.hint = "Turn \(look.label) \(on ? "off" : "on")" + (look.shortcut.map { "  \($0)" } ?? "")
+        offIcons[name]?.isHidden = on
+        updateDot()
     }
 
     @objc private func toggleLock() {
@@ -541,12 +678,24 @@ final class Overlay: NSObject, NSWindowDelegate {
     private func pollPointer() {
         let pointer = NSEvent.mouseLocation
         let inside = panel.frame.contains(pointer)
-        toolbar.isHidden = !inside
+        if inside != toolbarShown {
+            toolbarShown = inside
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = reduceMotion ? 0 : 0.15
+                toolbar.animator().alphaValue = inside ? 1 : 0
+            }
+        }
         let hovered = inside ? toolbar.arrangedSubviews.first {
             !$0.isHidden && screenFrame(of: $0).contains(pointer)
         } as? ToolButton : nil
+        if hovered !== self.hovered {
+            self.hovered?.isHovered = false
+            hovered?.isHovered = true
+            self.hovered = hovered
+        }
         hint.stringValue = hovered?.hint ?? ""
         hintBox.isHidden = hovered == nil
+        if panel.isVisible { updatePill() }
         if locked {
             // Click-through everywhere except the lock button, so it can still unlock.
             panel.ignoresMouseEvents = !screenFrame(of: lockButton).insetBy(dx: -6, dy: -6).contains(pointer)
@@ -565,7 +714,10 @@ final class Overlay: NSObject, NSWindowDelegate {
     // MARK: NSWindowDelegate — save on every change, since Ctrl+C kills us without warning.
 
     func windowDidMove(_ notification: Notification) { saveFrame() }
-    func windowDidResize(_ notification: Notification) { saveFrame() }
+    func windowDidResize(_ notification: Notification) {
+        panel.invalidateShadow()  // it follows the window's rounded outline
+        saveFrame()
+    }
 
     private func saveFrame() {
         defaults.set(NSStringFromRect(panel.frame), forKey: "frame")

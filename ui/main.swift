@@ -56,8 +56,18 @@ func mainMenu() -> NSMenu {
                                  keyEquivalent: "q")]),
         ("File", [NSMenuItem(title: "Close Window", action: #selector(NSWindow.performClose(_:)),
                              keyEquivalent: "w")]),
-        ("Edit", [NSMenuItem(title: "Select All", action: #selector(NSResponder.selectAll(_:)),
-                             keyEquivalent: "a")]),
+        ("Edit", [
+            NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"),
+            NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "Z"),
+            .separator(),
+            NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x"),
+            NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"),
+            NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"),
+            NSMenuItem(title: "Select All", action: #selector(NSResponder.selectAll(_:)), keyEquivalent: "a"),
+            .separator(),
+            // Home and Replay each answer startFind: by focusing their search field.
+            NSMenuItem(title: "Find…", action: Selector(("startFind:")), keyEquivalent: "f"),
+        ]),
     ] {
         let item = NSMenuItem()
         item.submenu = NSMenu(title: title)
@@ -98,6 +108,9 @@ home.onStart = {
     overlay.begin()
 }
 home.onOpen = { replay.open($0) }
+// Home's input toggles and the overlay's are the same setting.
+home.inputs = { overlay.inputs }
+home.onInputChange = { overlay.setInput($0, on: $1) }
 home.show()
 setLive(false)
 

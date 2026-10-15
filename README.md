@@ -26,7 +26,7 @@ Apple's ScreenCaptureKit.
 | Piece | What it does |
 | --- | --- |
 | `syscap.swift` | Captures system audio with ScreenCaptureKit and writes raw 16-bit mono PCM to stdout. |
-| `ui/` | The `overhear-ui` app: a Home window (Run live captioning, recordings list), the transparent always-on-top caption overlay, and the Replay window. |
+| `ui/` | The `overhear-ui` app: a Home window (Start live captions, searchable recordings list), the transparent always-on-top caption overlay, and the Replay window. |
 | `inputs.py` | Mixes whichever inputs are on (system audio, mic) into one steady stream, and notes when the mic hears speech. |
 | `recording.py` | Writes one session to disk: the exact audio sent to Deepgram plus its final captions. |
 | `stream_system_audio.py` | The main program: starts `overhear-ui`, and for each session captures the inputs, streams the mix to Deepgram, prints transcripts in the terminal, forwards them to the overlay, and saves or discards the recording. |
@@ -67,16 +67,19 @@ DEEPGRAM_API_KEY=your-key
 On first run, the script compiles the `syscap` and `overhear-ui` helpers with `swiftc`. It rebuilds
 them whenever their `.swift` sources change. The **Overhear** window opens:
 
-1. Click **Run live captioning** (or press **⌥⇧R** in any app). The window hides, the floating
-   overlay appears, and captions show up there and in the terminal as audio plays. Use the
-   **microphone** and **system audio** toggles at the left of the overlay toolbar to turn each
-   input on or off at any time (**⌥⇧M** toggles the mic from any app, and the overlay briefly
-   shows "Microphone on" or "off"); the choice is remembered for the next session (the first one
-   starts with system audio only).
+1. Pick what to caption with the **System audio** and **Microphone** checkboxes, then click
+   **Start live captions** (or press **⌥⇧R** in any app). The window hides, the floating overlay
+   appears, and captions show up there and in the terminal as audio plays. Use the **microphone**
+   and **system audio** toggles at the left of the overlay toolbar to turn each input on or off at
+   any time (**⌥⇧M** toggles the mic from any app, and the overlay briefly shows "Microphone on"
+   or "off"); the choice is remembered for the next session (the first one starts with system
+   audio only).
 2. End the session from the overlay toolbar with **Save** or **Discard**, or press **⌥⇧S** /
    **⌥⇧D** in any app. Both ask you to confirm with a second click or press within 3 seconds.
-   Either way you return to the Overhear window.
-3. Saved sessions are listed newest first, named `recording1`, `recording2`, … Double-click one
+   Either way you return to the Overhear window, with the recording you just saved selected.
+3. Saved sessions are listed newest first, named `recording1`, `recording2`, …, each with its
+   date, length, first caption, and an orange mic if you spoke in it. Type in the search field
+   (**⌘F**) to filter them by name or by anything said in them. Double-click one
    (or select it and press Return) to replay it. Right-click → *Rename* to give it a better name
    (Return saves, Esc cancels). To remove recordings, select one or more (⌘-click, ⇧-click or ⌘A)
    and press Delete, click the trash button, or right-click → *Move to Trash*.
@@ -109,14 +112,17 @@ in `stream_system_audio.py`.
 ### The overlay window
 
 - **Move** it by dragging anywhere inside; **resize** it by dragging its border.
-- Toolbar buttons (hover one to see its name): **microphone** and **system audio** on/off
-  (slashed while off), smaller/larger text, cycle background opacity, clear the screen, **lock**
+- A pill in the top-left corner shows the session is live: a pulsing red dot, the time since it
+  started, and a slashed icon for each input that's off. The dot turns gray while both are off.
+- The toolbar fades in while the pointer is over the overlay. Buttons (hover one to see its name): **microphone** and **system audio** on/off
+  (slashed while off), smaller/larger text, cycle how dark the frosted background is, clear the screen, **lock**
   (makes the window click-through, so it never gets in the way), **Save** and **Discard**.
 - Whatever is on is mixed into one transcript. With both off the session keeps running silently,
   so you can turn an input back on without starting over. If an input fails (say, the mic is
   unplugged), the error shows in red and its toggle turns off.
 - It never takes keyboard focus. Position, size, font size and opacity are remembered between runs.
-- Interim (in-progress) text is shown until Deepgram finalizes it. The last 50 lines are shown;
+- The newest line is brightest. Interim (in-progress) text is shown, fainter, until Deepgram
+  finalizes it. The last 50 lines are shown;
   a saved recording keeps every line.
 
 ### Recordings
@@ -143,14 +149,19 @@ save (if conversion fails, `audio.wav` is kept instead).
 - Half-written sessions left by a crash are deleted on the next launch.
 
 In **Replay**, the line being spoken is highlighted and kept in view (scrolling by hand pauses
-that for a few seconds). Click any line to play from there. **Space** plays and pauses, and the
+that for a few seconds), and lines already played are dimmed. Click any line to play from there. **Space** plays and pauses, and the
 slider seeks. **←** / **→** skip back / forward by the step shown next to the clock (3 s to
 start; change it with the arrows beside it, and it's remembered). A hint above the clock shows how far you've
 skipped. **↑** / **↓** restart the line being played; pressed again within a second, they go to
 the previous / next line. **C** covers or uncovers the line being played, and **Shift+C** covers or uncovers the
 whole transcript (handy for listening first). Covered lines are shown again the next time you
-open the recording. A line under the playback bar lists these keys. An orange mic icon marks the
-lines you spoke in, so you can jump straight to them.
+open the recording. **[** / **]** slow down / speed up playback (0.75× to 2×, also in the menu
+next to the clock, and remembered). **⌘F** finds text in the transcript: matches are highlighted,
+Return / Shift+Return go to the next / previous one, and Esc clears the search. **⌘C** copies the
+selected lines (⌘-click or ⇧-click to select, ⌘A for all), or the playing line when none are
+selected, as `[m:ss] text`; **Copy transcript** copies them all. A line under the playback bar
+lists these keys. An orange mic icon marks the lines you spoke in, so you can jump straight to
+them.
 
 ## Running the helpers on their own
 
@@ -197,7 +208,7 @@ session has been handled.
 
 It writes the user's clicks to stdout, one per line: `{"type": "start", "system": true, "mic":
 false}` (with the toggles' state), `{"type": "input", "name": "mic", "on": true}`,
-`{"type": "save"}` or `{"type": "discard"}`. To try it by hand, click Run live captioning, then:
+`{"type": "save"}` or `{"type": "discard"}`. To try it by hand, click Start live captions, then:
 
 ```sh
 (sleep 5; printf '%s\n' '{"type":"status","text":"Hello"}' '{"type":"final","text":"Overhear works."}'; sleep 30) \

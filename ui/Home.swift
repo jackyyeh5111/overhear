@@ -1,8 +1,16 @@
-// The main window: start a live session, or find, open, rename and trash saved recordings.
-// A second tab does the same for imported YouTube videos, and takes links to import.
+// The main window: start a live session, or find, open, rename and trash saved recordings
+// (⌘Z puts trashed ones back). A second tab does the same for imported YouTube videos, and takes
+// links to import.
 import AppKit
 
 private let homeTabKey = "homeTab"
+private let bannerSeconds = 8.0  // how long "Moved … to the Trash · Undo" stays up
+
+/// A recording in the Trash, and where it went there, so undo can put it back.
+private struct Trashed {
+    let recording: Recording
+    let url: URL
+}
 
 /// Return opens the selected recording; Delete moves every selected one to the Trash.
 final class RecordingsTable: NSTableView {
@@ -141,6 +149,9 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
     private let emptyDetail = NSTextField(wrappingLabelWithString: "")
     private let emptyState = NSStackView()
     private var trashButton: NSButton!
+    private let banner = NSVisualEffectView()
+    private let bannerText = NSTextField(labelWithString: "")
+    private var bannerTimer: Timer?
     private var inputToggles: [String: NSButton] = [:]
     private var recordings: [Recording] = []
     private var shown: [Recording] = []  // `recordings` that match the search; the table's rows
@@ -219,7 +230,7 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
         trashButton = NSButton(image: NSImage(systemSymbolName: "trash", accessibilityDescription: "Move to Trash")!,
                                target: self, action: #selector(trashSelected))
         trashButton.isBordered = false
-        trashButton.toolTip = "Move selected recordings to the Trash"
+        trashButton.toolTip = "Move selected recordings to the Trash (⌘Z puts them back)"
         trashButton.isEnabled = false
 
         table.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("recording")))
@@ -259,7 +270,26 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
         emptyState.spacing = 6
 
         let content = window.contentView!
-        for view in [hero, tabs, search, trashButton!, importRow, scroll, emptyState] {
+        let bannerIcon = NSImageView(image: NSImage(systemSymbolName: "trash", accessibilityDescription: nil)!)
+        bannerIcon.contentTintColor = .secondaryLabelColor
+        bannerText.font = .systemFont(ofSize: 12)
+        bannerText.lineBreakMode = .byTruncatingMiddle
+        bannerText.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let undo = NSButton(title: "Undo", target: self, action: #selector(undoClicked))
+        undo.bezelStyle = .rounded
+        undo.controlSize = .small
+        let bannerRow = NSStackView(views: [bannerIcon, bannerText, undo])
+        bannerRow.spacing = 8
+        bannerRow.edgeInsets = NSEdgeInsets(top: 6, left: 12, bottom: 6, right: 8)
+        bannerRow.translatesAutoresizingMaskIntoConstraints = false
+        banner.addSubview(bannerRow)
+        banner.material = .popover
+        banner.state = .active
+        banner.wantsLayer = true
+        banner.layer?.cornerRadius = 8
+        banner.isHidden = true
+
+        for view in [hero, tabs, search, trashButton!, importRow, scroll, emptyState, banner] {
             view.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(view)
         }
@@ -286,6 +316,13 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
             scroll.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -6),
             emptyState.centerXAnchor.constraint(equalTo: scroll.centerXAnchor),
             emptyState.centerYAnchor.constraint(equalTo: scroll.centerYAnchor, constant: -20),
+            bannerRow.topAnchor.constraint(equalTo: banner.topAnchor),
+            bannerRow.bottomAnchor.constraint(equalTo: banner.bottomAnchor),
+            bannerRow.leadingAnchor.constraint(equalTo: banner.leadingAnchor),
+            bannerRow.trailingAnchor.constraint(equalTo: banner.trailingAnchor),
+            banner.centerXAnchor.constraint(equalTo: scroll.centerXAnchor),
+            banner.bottomAnchor.constraint(equalTo: scroll.bottomAnchor, constant: -14),
+            banner.widthAnchor.constraint(lessThanOrEqualTo: scroll.widthAnchor, constant: -40),
         ])
         showTab()
         window.initialFirstResponder = table  // not the search field, which would show a focus ring
@@ -466,14 +503,24 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
         onOpen?(shown[row])
     }
 
-    /// Trashes as many of `rows` as it can, then reports the first failure, if any.
     private func trash(rows: IndexSet) {
         let doomed = rows.filter(shown.indices.contains)
         guard let first = doomed.first else { return }
+        trash(doomed.map { shown[$0] }, tab: tabs.selectedSegment)
+        // Like Finder, select the row that took the first one's place.
+        if !shown.isEmpty {
+            table.selectRowIndexes([min(first, shown.count - 1)], byExtendingSelection: false)
+        }
+    }
+
+    /// Trashes as many of `items` (listed on `tab`) as it can, then reports the first failure, if
+    /// any. Those trashed come back together with one ⌘Z, or the banner's Undo.
+    private func trash(_ items: [Recording], tab: Int) {
+        var trashed: [Trashed] = []
         var failure: Error?
-        for row in doomed {
+        for item in items {
             do {
-                try shown[row].moveToTrash()
+                trashed.append(Trashed(recording: item, url: try item.moveToTrash()))
             } catch {
                 failure = failure ?? error
             }
@@ -481,11 +528,62 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
         if let failure { NSAlert(error: failure).beginSheetModal(for: window) }
         recordings = Recording.all(in: dir)
         refilter(select: [])
-        // Like Finder, select the row that took the first one's place.
-        if !shown.isEmpty {
-            table.selectRowIndexes([min(first, shown.count - 1)], byExtendingSelection: false)
+        guard !trashed.isEmpty else { return }
+        window.undoManager?.registerUndo(withTarget: self) { $0.putBack(trashed, tab: tab) }
+        window.undoManager?.setActionName("Move to Trash")
+        showBanner(trashed.count == 1 ? "Moved “\(trashed[0].recording.name)” to the Trash"
+                                      : "Moved \(trashed.count) recordings to the Trash")
+    }
+
+    /// Undoes one trash: puts its recordings back and selects them on the tab they were trashed
+    /// from. Redo trashes them again.
+    private func putBack(_ trashed: [Trashed], tab: Int) {
+        hideBanner()
+        if tabs.selectedSegment != tab {
+            tabs.selectedSegment = tab
+            tabChanged()
+        }
+        var restored: [Recording] = []
+        var failure: Error?
+        for item in trashed {
+            do {
+                try Recording.putBack(from: item.url, to: item.recording.folder)
+                restored.append(item.recording)
+            } catch {
+                failure = failure ?? error
+            }
+        }
+        if let failure { NSAlert(error: failure).beginSheetModal(for: window) }
+        recordings = Recording.all(in: dir)
+        refilter(select: Set(restored.map(\.folder)))
+        guard !restored.isEmpty else { return }
+        window.undoManager?.registerUndo(withTarget: self) { $0.trash(restored, tab: tab) }
+        window.undoManager?.setActionName("Move to Trash")
+    }
+
+    private func showBanner(_ text: String) {
+        bannerText.stringValue = text
+        banner.alphaValue = 1
+        banner.isHidden = false
+        bannerTimer?.invalidate()
+        bannerTimer = Timer.scheduledTimer(withTimeInterval: bannerSeconds, repeats: false) { [weak self] _ in
+            self?.hideBanner()
         }
     }
+
+    /// Fades the banner out, unless a new trash shows it again meanwhile.
+    private func hideBanner() {
+        bannerTimer?.invalidate()
+        bannerTimer = nil
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.3
+            banner.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            if self?.bannerTimer == nil { self?.banner.isHidden = true }
+        })
+    }
+
+    @objc private func undoClicked() { window.undoManager?.undo() }
 
     // Closing Home quits the app (and with it the Python side).
     func windowWillClose(_ notification: Notification) { NSApp.terminate(nil) }

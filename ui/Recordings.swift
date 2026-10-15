@@ -49,8 +49,23 @@ struct Recording {
         return folders.compactMap(load).sorted { $0.startedAt > $1.startedAt }
     }
 
-    func moveToTrash() throws {
-        try FileManager.default.trashItem(at: folder, resultingItemURL: nil)
+    /// Moves the recording's folder to the Trash and returns where it went there, for putBack.
+    func moveToTrash() throws -> URL {
+        var trashed: NSURL?
+        try FileManager.default.trashItem(at: folder, resultingItemURL: &trashed)
+        return (trashed as URL?) ?? folder
+    }
+
+    /// Moves a trashed folder back to where it was. Never overwrites: if something new is at
+    /// `folder` (say, the same YouTube video imported again), it fails and both stay as they are.
+    static func putBack(from trashed: URL, to folder: URL) throws {
+        if FileManager.default.fileExists(atPath: folder.path) {
+            throw CocoaError(.fileWriteFileExists, userInfo: [
+                NSLocalizedDescriptionKey: "“\(folder.lastPathComponent)” couldn't be put back: "
+                    + "a recording is already there.",
+            ])
+        }
+        try FileManager.default.moveItem(at: trashed, to: folder)
     }
 
     /// Stores a new name in captions.json, leaving the rest of the file as it was.

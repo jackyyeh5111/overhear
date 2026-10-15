@@ -86,6 +86,9 @@ them whenever their `.swift` sources change. The **Overhear** window opens:
    (or select it and press Return) to replay it. Right-click → *Rename* to give it a better name
    (Return saves, Esc cancels). To remove recordings, select one or more (⌘-click, ⇧-click or ⌘A)
    and press Delete, click the trash button, or right-click → *Move to Trash*.
+   Changed your mind? Press **⌘Z** (Edit → *Undo Move to Trash*) or click **Undo** in the banner
+   that appears, and they come back. Until you quit, you can undo several deletes in a row, and
+   **⇧⌘Z** trashes them again. After that, they're still in the Finder Trash.
 
 Close the Overhear window, press **⌘Q**, or press **Ctrl+C** in the terminal to quit.
 

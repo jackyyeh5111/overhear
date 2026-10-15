@@ -3,7 +3,7 @@
 // hidden .partial folder and are never listed.
 import Foundation
 
-struct CaptionLine: Decodable {
+struct CaptionLine: Codable {
     let start: Double
     let end: Double
     let text: String

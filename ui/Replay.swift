@@ -4,7 +4,8 @@
 // forward by the step set in the playback bar, and a hint in the corner shows how far. ↑ / ↓
 // restart the playing line, then go to the previous / next one. [ / ] change the speed. C covers
 // the playing line and Shift+C the whole transcript (press again to uncover). ⌘F finds text in
-// the transcript; ⌘C copies the selected lines (⌘-click or ⇧-click to select).
+// the transcript; ⌘C copies the selected lines (⌘-click or ⇧-click to select). The Lines menu
+// rebuilds the transcript into lines of about N seconds each (see Lines.swift).
 import AppKit
 import AVFoundation
 import Carbon.HIToolbox  // kVK_ key codes
@@ -16,6 +17,8 @@ let seekStepKey = "replaySeekStep"
 let defaultSeekStep = 3.0    // seconds ← / → skip until the user changes it
 let rateKey = "replayRate"
 let rates: [Float] = [0.75, 1, 1.25, 1.5, 2]
+let lineSecondsKey = "replayLineSeconds"
+let lineLengths: [Double] = [0, 3, 5, 8, 10, 15, 20, 30]  // seconds per line; 0 keeps Deepgram's
 let findOptions: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
 
 /// A stack view that ignores the mouse, so clicks reach the views underneath.
@@ -53,6 +56,9 @@ final class LineRowView: NSTableRowView {
 /// "1.25×".
 func rateTitle(_ rate: Float) -> String { String(format: "%g×", rate) }
 
+/// "Original lines", "8 s lines".
+func lineLengthTitle(_ seconds: Double) -> String { seconds == 0 ? "Original lines" : "\(Int(seconds)) s lines" }
+
 final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate,
                     NSSearchFieldDelegate, AVAudioPlayerDelegate {
     private let window: NSWindow
@@ -66,6 +72,7 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
     private let slider = NSSlider()
     private let timeLabel = NSTextField(labelWithString: "")
     private let speed = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let lineLength = NSPopUpButton(frame: .zero, pullsDown: false)
     private let stepLabel = NSTextField(labelWithString: "")
     private let stepper = NSStepper()
     private let hintBox = PassThroughStack()
@@ -74,6 +81,7 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
     private let font = NSFont.systemFont(ofSize: 14)
 
     private var heading = ""  // "name — date", atop a copied transcript
+    private var original: [CaptionLine] = []  // as saved; `lines` is these regrouped
     private var lines: [CaptionLine] = []
     private var player: AVAudioPlayer?
     private var rate: Float = {
@@ -168,6 +176,13 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         speed.action = #selector(speedChosen)
         speed.toolTip = "Playback speed  [ ]"
         speed.selectItem(at: rates.firstIndex(of: rate) ?? 1)
+        lineLength.addItems(withTitles: lineLengths.map(lineLengthTitle))
+        lineLength.controlSize = .small
+        lineLength.font = speed.font
+        lineLength.target = self
+        lineLength.action = #selector(lineLengthChosen)
+        lineLength.toolTip = "Seconds per line"
+        lineLength.selectItem(at: lineLengths.firstIndex(of: defaults.double(forKey: lineSecondsKey)) ?? 0)
         stepLabel.font = timeLabel.font
         stepLabel.textColor = .secondaryLabelColor
         stepper.minValue = 1
@@ -181,11 +196,12 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         for view in [stepLabel, stepper] as [NSView] { view.toolTip = "Seconds ← and → skip" }
         showStep()
 
-        let bar = NSStackView(views: [playButton, slider, timeLabel, speed, stepLabel, stepper])
+        let bar = NSStackView(views: [playButton, slider, timeLabel, speed, lineLength, stepLabel, stepper])
         bar.spacing = 10
         bar.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 6, right: 12)
         bar.setCustomSpacing(14, after: timeLabel)
         bar.setCustomSpacing(14, after: speed)
+        bar.setCustomSpacing(14, after: lineLength)
         bar.setCustomSpacing(2, after: stepLabel)
         for label in [timeLabel, stepLabel] {
             label.setContentHuggingPriority(.required, for: .horizontal)
@@ -288,7 +304,8 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
     /// Shows `recording` (reusing the window), ready to play from the start.
     func open(_ recording: Recording) {
         stop()
-        lines = recording.lines
+        original = recording.lines
+        lines = regrouped()
         heading = "\(recording.name) — \(recording.title)"
         player = try? AVAudioPlayer(contentsOf: recording.audioURL)
         player?.delegate = self
@@ -451,6 +468,25 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
     private func refreshText(_ rows: IndexSet) {
         table.reloadData(forRowIndexes: rows,
                          columnIndexes: IndexSet(integer: table.column(withIdentifier: textColumn.identifier)))
+    }
+
+    /// Lines of the chosen length, or the saved ones for Original.
+    private func regrouped() -> [CaptionLine] {
+        let seconds = lineLengths[lineLength.indexOfSelectedItem]
+        return regroup(original, seconds: seconds > 0 ? seconds : nil)
+    }
+
+    @objc private func lineLengthChosen() {
+        defaults.set(lineLengths[lineLength.indexOfSelectedItem], forKey: lineSecondsKey)
+        lines = regrouped()
+        current = -1  // tick() finds the playing line in the new list
+        // Single covers were by row, which no longer match; a covered transcript stays covered.
+        hidden = allHidden ? IndexSet(integersIn: lines.indices) : []
+        table.deselectAll(nil)
+        updateMatches()
+        table.reloadData()
+        lastManualScroll = .distantPast
+        tick()
     }
 
     @objc private func stepChanged() {

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Linked into the overhear-ui binary (see build_helper in stream_system_audio.py), so the menu
+     bar and ⌘-Tab call it Overhear even though it isn't an .app bundle. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Overhear</string>
+	<key>CFBundleDisplayName</key>
+	<string>Overhear</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.jackyyeh.overhear</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>

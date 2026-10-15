@@ -28,7 +28,7 @@ Apple's ScreenCaptureKit.
 | Piece | What it does |
 | --- | --- |
 | `syscap.swift` | Captures system audio with ScreenCaptureKit and writes raw 16-bit mono PCM to stdout. |
-| `ui/` | The `overhear-ui` app: a Home window (Start live captions, searchable recordings list), the transparent always-on-top caption overlay, and the Replay window. |
+| `ui/` | The `overhear-ui` app: a Home window (Start live captions, searchable recordings list), the transparent always-on-top caption overlay, and the Replay window. Its Dock icon is drawn in code (`Icon.swift`), and `Info.plist` is linked into the binary so it's named Overhear. |
 | `inputs.py` | Mixes whichever inputs are on (system audio, mic) into one steady stream, and notes when the mic hears speech. |
 | `recording.py` | Writes one session to disk: the exact audio sent to Deepgram plus its final captions. |
 | `youtube.py` | Imports a YouTube video: downloads its audio and English captions with yt-dlp (or has Deepgram transcribe it) and saves them in the recordings' format. |
@@ -205,7 +205,8 @@ The Python script builds and launches both helpers for you. You can also build t
 
 ```sh
 swiftc -O -swift-version 5 -o syscap syscap.swift
-swiftc -O -swift-version 5 -o overhear-ui ui/*.swift
+swiftc -O -swift-version 5 -o overhear-ui \
+  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker ui/Info.plist ui/*.swift
 ```
 
 ### `syscap`

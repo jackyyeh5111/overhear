@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 
 import stream_system_audio
 from recording import Recording
@@ -68,3 +69,20 @@ def test_stream_records_mixed_chunks_and_marks_mic_lines(tmp_path, monkeypatch):
     assert len(deepgram.audio) >= 5 and rec.duration >= 0.5
     assert rec.lines == [{"start": 0.0, "end": 0.5, "text": "hello there", "mic": True}]
     assert ("final", "hello there") in shown
+
+
+def test_build_helper_links_plist_and_rebuilds_when_it_changes(tmp_path, monkeypatch):
+    src, plist, binary = tmp_path / "a.swift", tmp_path / "Info.plist", tmp_path / "app"
+    for path, mtime in [(src, 100), (binary, 200), (plist, 300)]:
+        path.write_text("")
+        os.utime(path, (mtime, mtime))
+    runs = []
+    monkeypatch.setattr(stream_system_audio.subprocess, "run", lambda args, check: runs.append(args))
+
+    stream_system_audio.build_helper([str(src)], str(binary))  # binary newer than the source
+    assert runs == []
+    stream_system_audio.build_helper([str(src)], str(binary), str(plist))  # plist newer
+    [args] = runs
+    assert args[-1] == str(src)
+    assert ["-sectcreate", "__TEXT", "__info_plist", str(plist)] == [
+        a for a in args if a != "-Xlinker"][-5:-1]

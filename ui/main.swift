@@ -140,4 +140,6 @@ Thread {
     DispatchQueue.main.async { overlay.finish() }
 }.start()
 
+// Set once launching has finished; set earlier, it's reset to the generic executable icon.
+DispatchQueue.main.async { app.applicationIconImage = overhearIcon() }
 app.run()

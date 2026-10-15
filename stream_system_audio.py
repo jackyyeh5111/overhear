@@ -36,6 +36,7 @@ HELPER_SRC = os.path.join(HERE, "syscap.swift")
 HELPER_BIN = os.path.join(HERE, "syscap")
 UI_SRCS = sorted(glob.glob(os.path.join(HERE, "ui", "*.swift")))
 UI_BIN = os.path.join(HERE, "overhear-ui")
+UI_PLIST = os.path.join(HERE, "ui", "Info.plist")  # names the app "Overhear" in the menu bar
 SYSTEM_RATE = 48000  # every input is captured at this rate, so they can be mixed
 LABELS = {"system": "system audio", "mic": "microphone"}
 # How long Save/Discard waits for Deepgram to finalize the audio it already heard
@@ -71,11 +72,19 @@ def load_key() -> str | None:
     return None
 
 
-def build_helper(srcs: list[str], binary: str):
-    if os.path.exists(binary) and os.path.getmtime(binary) >= max(map(os.path.getmtime, srcs)):
+def build_helper(srcs: list[str], binary: str, plist: str | None = None):
+    """Compiles `srcs` into `binary` unless it's newer than all of them (and `plist`).
+
+    `plist` is linked into the binary as its Info.plist, which gives an executable that isn't an
+    .app bundle a name and identifier.
+    """
+    inputs = srcs + ([plist] if plist else [])
+    if os.path.exists(binary) and os.path.getmtime(binary) >= max(map(os.path.getmtime, inputs)):
         return
     print(f"Building {os.path.basename(binary)} helper (one-time)...")
-    subprocess.run(["swiftc", "-O", "-swift-version", "5", "-o", binary, *srcs], check=True)
+    link = ["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist",
+            "-Xlinker", plist] if plist else []
+    subprocess.run(["swiftc", "-O", "-swift-version", "5", "-o", binary, *link, *srcs], check=True)
 
 
 class UI:
@@ -358,7 +367,7 @@ def main():
     if device is None or not args.no_overlay:
         build_helper([HELPER_SRC], HELPER_BIN)
     if not args.no_overlay:
-        build_helper(UI_SRCS, UI_BIN)
+        build_helper(UI_SRCS, UI_BIN, UI_PLIST)
     try:
         asyncio.run(run(device, not args.no_overlay))
     except KeyboardInterrupt:

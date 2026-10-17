@@ -40,6 +40,8 @@ final class RecordingCell: NSTableCellView {
     private let micBadge = NSImageView(image: NSImage(systemSymbolName: "mic.fill",
                                                       accessibilityDescription: "You spoke")!)
     private let previewField = NSTextField(labelWithString: "")
+    private let bookmark = NSImageView(image: NSImage(systemSymbolName: "bookmark.fill",
+                                                      accessibilityDescription: "Left off")!)
 
     init() {
         super.init(frame: .zero)
@@ -54,20 +56,25 @@ final class RecordingCell: NSTableCellView {
         micBadge.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
         micBadge.contentTintColor = .systemOrange
         micBadge.toolTip = "You spoke in this recording"
+        bookmark.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold)
+        bookmark.contentTintColor = .controlAccentColor
+        bookmark.toolTip = "Where you left off; Replay opens there"
         previewField.font = .systemFont(ofSize: 12)
         previewField.textColor = .secondaryLabelColor
         previewField.lineBreakMode = .byTruncatingTail
         previewField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         textField = nameField
 
-        for view in [nameField, lengthField, dateField, micBadge, previewField] {
+        for view in [nameField, lengthField, dateField, micBadge, previewField, bookmark] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
         NSLayoutConstraint.activate([
             nameField.topAnchor.constraint(equalTo: topAnchor, constant: 8),
             nameField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
-            nameField.trailingAnchor.constraint(lessThanOrEqualTo: lengthField.leadingAnchor, constant: -8),
+            nameField.trailingAnchor.constraint(lessThanOrEqualTo: bookmark.leadingAnchor, constant: -8),
+            bookmark.trailingAnchor.constraint(equalTo: lengthField.leadingAnchor, constant: -4),
+            bookmark.centerYAnchor.constraint(equalTo: lengthField.centerYAnchor),
             lengthField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             lengthField.firstBaselineAnchor.constraint(equalTo: nameField.firstBaselineAnchor),
             dateField.topAnchor.constraint(equalTo: nameField.bottomAnchor, constant: 1),
@@ -84,7 +91,10 @@ final class RecordingCell: NSTableCellView {
 
     func show(_ recording: Recording) {
         nameField.stringValue = recording.name
-        lengthField.stringValue = formatTime(recording.duration)
+        let left = leftOff.time(for: recording.folder)
+        lengthField.stringValue = left.map { "\(formatTime($0)) of \(formatTime(recording.duration))" }
+            ?? formatTime(recording.duration)
+        bookmark.isHidden = left == nil
         dateField.stringValue = recording.channel.map { "\($0) · \(recording.relativeTitle)" } ?? recording.relativeTitle
         micBadge.isHidden = !recording.hasMic
         previewField.stringValue = recording.preview.map { "“\($0)”" } ?? "No captions"
@@ -94,6 +104,7 @@ final class RecordingCell: NSTableCellView {
     override var backgroundStyle: NSView.BackgroundStyle {
         didSet {
             for field in [nameField, lengthField, dateField, previewField] { field.cell?.backgroundStyle = backgroundStyle }
+            bookmark.contentTintColor = backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : .controlAccentColor
         }
     }
 }
@@ -406,6 +417,11 @@ final class Home: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableView
         }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Redraws the rows, e.g. after Replay remembers a new left-off spot.
+    func refreshRows() {
+        table.reloadData(forRowIndexes: IndexSet(integersIn: 0..<shown.count), columnIndexes: [0])
     }
 
     /// Re-reads the recordings folder, keeping the same ones selected.

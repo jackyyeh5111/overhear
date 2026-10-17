@@ -28,7 +28,7 @@ Apple's ScreenCaptureKit.
 | Piece | What it does |
 | --- | --- |
 | `syscap.swift` | Captures system audio with ScreenCaptureKit and writes raw 16-bit mono PCM to stdout. |
-| `ui/` | The `overhear-ui` app: a Home window (Start live captions, searchable recordings list), the transparent always-on-top caption overlay, and the Replay window. Its Dock icon is drawn in code (`Icon.swift`), and `Info.plist` is linked into the binary so it's named Overhear. |
+| `ui/` | The `overhear-ui` app: a Home window (Start live captions, searchable recordings list), the transparent always-on-top caption overlay, and the Replay window, which picks up where you left off (`LeftOff.swift`). Its Dock icon is drawn in code (`Icon.swift`), and `Info.plist` is linked into the binary so it's named Overhear. |
 | `inputs.py` | Mixes whichever inputs are on (system audio, mic) into one steady stream, and notes when the mic hears speech. |
 | `recording.py` | Writes one session to disk: the exact audio sent to Deepgram plus its final captions. |
 | `youtube.py` | Imports a YouTube video: downloads its audio and English captions with yt-dlp (or has Deepgram transcribe it) and saves them in the recordings' format. |
@@ -153,6 +153,11 @@ save (if conversion fails, `audio.wav` is kept instead).
 - Quitting or pressing Ctrl+C mid-session saves automatically, unless there's nothing worth
   keeping (no captions and under 3 seconds of audio).
 - Half-written sessions left by a crash are deleted on the next launch.
+
+**Replay** remembers where you left off in each recording and video. Reopen one and it starts
+there, paused, with a bookmark on that line and *Left off at 12:34* in the corner; Home shows it
+as *🔖 12:34 of 45:00*. Stopping in the first or last 5 seconds isn't remembered, so a finished
+one opens from the start again.
 
 In **Replay**, the line being spoken is highlighted and kept in view (scrolling by hand pauses
 that for a few seconds), and lines already played are dimmed. Click any line to play from there. **Space** plays and pauses, and the

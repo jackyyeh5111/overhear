@@ -22,6 +22,8 @@ let recordingsDir = URL(fileURLWithPath: CommandLine.arguments.count > 1
                         ? CommandLine.arguments[1] : "recordings")
 let youtubeDir = URL(fileURLWithPath: CommandLine.arguments.count > 2
                      ? CommandLine.arguments[2] : "youtube")
+let leftOff = LeftOff(store: defaults)
+leftOff.prune()
 
 struct Message: Decodable {
     let type: String
@@ -114,6 +116,7 @@ home.onStart = {
     overlay.begin()
 }
 home.onOpen = { replay.open($0) }
+replay.onLeave = { home.refreshRows() }
 home.onImport = { emit("import", ["url": $0]) }
 // Home's input toggles and the overlay's are the same setting.
 home.inputs = { overlay.inputs }

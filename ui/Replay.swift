@@ -109,6 +109,10 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
     private var timer: Timer?
     private var skipTotal = 0.0     // how far the current run of ← / → presses has moved
     private var hintTimer: Timer?   // ends that run and hides the hint
+    private var folder: URL?        // the open recording's, to remember where you left off
+    private var leftOffAt: Double?  // where you'd stopped last time, bookmarked for this viewing
+    private var savedAt = 0.0       // the time last remembered, so tick() saves only as it moves
+    var onLeave: (() -> Void)?      // the recording was closed or switched, so Home can update
 
     override init() {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 560),
@@ -315,7 +319,8 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         return b
     }
 
-    /// Shows `recording` (reusing the window), ready to play from the start.
+    /// Shows `recording` (reusing the window), ready to play from where you left off last time,
+    /// or else from the start.
     func open(_ recording: Recording) {
         stop()
         original = recording.lines
@@ -326,6 +331,12 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         player?.enableRate = true  // must be set before prepareToPlay
         player?.rate = rate
         player?.prepareToPlay()
+        folder = recording.folder
+        leftOffAt = player.flatMap { player in
+            leftOff.time(for: recording.folder).flatMap { $0 < player.duration ? $0 : nil }
+        }
+        player?.currentTime = leftOffAt ?? 0
+        savedAt = leftOffAt ?? 0
         window.title = recording.name
         window.subtitle = recording.title
         current = -1
@@ -346,6 +357,9 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(table)
         NSApp.activate(ignoringOtherApps: true)
+        if let leftOffAt {
+            flashHint("Left off at \(formatTime(leftOffAt))", symbol: "bookmark.fill", seconds: 4)
+        }
     }
 
     func close() { window.close() }
@@ -353,8 +367,11 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
     func windowWillClose(_ notification: Notification) { stop() }
 
     private func stop() {
+        savePosition()
         player?.stop()
         player = nil
+        if folder != nil { onLeave?() }
+        folder = nil
         timer?.invalidate()
         timer = nil
         hideHint()
@@ -444,13 +461,13 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         flashHint("\(abs(shown))s", symbol: back ? "gobackward" : "goforward")
     }
 
-    /// Shows `text` after the `symbol` icon in the corner pill for 1.5 s.
-    private func flashHint(_ text: String, symbol: String) {
+    /// Shows `text` after the `symbol` icon in the corner pill for `seconds`.
+    private func flashHint(_ text: String, symbol: String, seconds: Double = 1.5) {
         hintIcon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
         hintText.stringValue = text
         hintBox.isHidden = false
         hintTimer?.invalidate()
-        hintTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
+        hintTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in
             self?.hideHint()
         }
     }
@@ -564,7 +581,20 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         if current >= 0 && Date().timeIntervalSince(lastManualScroll) > manualScrollPause {
             table.scrollRowToVisible(current)
         }
+
+        // Remembered as you go, since quitting from the terminal skips closing the window: every
+        // 5 s while playing, and at once when you pause or move while paused.
+        if let player, player.isPlaying ? abs(now - savedAt) >= 5 : now != savedAt { savePosition() }
     }
+
+    private func savePosition() {
+        guard let player, let folder else { return }
+        savedAt = player.currentTime
+        leftOff.save(savedAt, duration: player.duration, for: folder)
+    }
+
+    /// The line bookmarked as where you left off, if any.
+    private var leftOffRow: Int? { leftOffAt.map { lineIndex(at: $0 + leadIn) } }
 
     /// The line being spoken at `time`: the last one that started at or before it, so a pause
     /// between lines keeps the previous one lit. -1 before the first line starts.
@@ -680,12 +710,20 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
     func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
         guard let id = column?.identifier else { return nil }
         if id.rawValue == "mic" {
-            guard lines[row].mic == true else { return nil }
-            let icon = tableView.makeView(withIdentifier: id, owner: self) as? NSImageView
-                ?? NSImageView(image: NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "You spoke")!)
+            // The left-off bookmark, else the mic badge.
+            let bookmarked = row == leftOffRow
+            guard bookmarked || lines[row].mic == true else { return nil }
+            let icon = tableView.makeView(withIdentifier: id, owner: self) as? NSImageView ?? NSImageView()
             icon.identifier = id
-            icon.contentTintColor = .systemOrange
-            icon.toolTip = "Your microphone heard speech in this line"
+            if bookmarked, let leftOffAt {
+                icon.image = NSImage(systemSymbolName: "bookmark.fill", accessibilityDescription: "You left off here")
+                icon.contentTintColor = .controlAccentColor
+                icon.toolTip = "You left off here (\(formatTime(leftOffAt)))"
+            } else {
+                icon.image = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "You spoke")
+                icon.contentTintColor = .systemOrange
+                icon.toolTip = "Your microphone heard speech in this line"
+            }
             return icon
         }
         let cell = tableView.makeView(withIdentifier: id, owner: self) as? NSTextField

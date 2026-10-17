@@ -197,7 +197,9 @@ Lines are the video's English captions: the uploader's when there are any, else 
 auto-generated ones (which have no punctuation, so the **Lines** menu can only split them by
 length). A video with neither is sent to Deepgram's prerecorded API instead. Pasting a video that's
 already there just selects it. If yt-dlp warns that it has no JavaScript runtime and a download
-fails, install [deno](https://deno.com) (`brew install deno`).
+fails, install [deno](https://deno.com) (`brew install deno`). `curl_cffi` (in requirements.txt)
+lets yt-dlp download captions as a browser would; without it, YouTube is quicker to refuse them
+with "HTTP Error 429: Too Many Requests".
 
 ## Running the helpers on their own
 

@@ -4,9 +4,11 @@
 // forward by the step set in the playback bar, and a hint in the corner shows how far. ↑ / ↓
 // restart the playing line, then go to the previous / next one. [ / ] change the speed. C covers
 // the playing line and Shift+C the whole transcript (press again to uncover). ⌘F finds text in
-// the transcript; ⌘C copies the selected lines (⌘-click or ⇧-click to select). The Lines menu
-// rebuilds the transcript into lines of about N seconds each (see Lines.swift). ⌘+ / ⌘- make the
-// text bigger / smaller, and ⌘0 goes back to the default size.
+// the transcript. Dragging over the text selects it, across lines too (double-click selects a
+// word, triple-click a line), and ⌘C copies it; with no text selected, ⌘C copies the selected
+// lines (⌘-click or ⇧-click to select). The Lines menu rebuilds the transcript into lines of about
+// N seconds each (see Lines.swift). ⌘+ / ⌘- make the text bigger / smaller, and ⌘0 goes back to
+// the default size.
 import AppKit
 import AVFoundation
 import Carbon.HIToolbox  // kVK_ key codes
@@ -28,6 +30,45 @@ let findOptions: String.CompareOptions = [.caseInsensitive, .diacriticInsensitiv
 /// A stack view that ignores the mouse, so clicks reach the views underneath.
 final class PassThroughStack: NSStackView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+/// The transcript's table. Hands mouse-downs to `onMouseDown` first, which returns false for the
+/// ones it leaves to the table.
+final class LinesTable: NSTableView {
+    var onMouseDown: ((NSEvent) -> Bool)?
+
+    override func mouseDown(with event: NSEvent) {
+        if onMouseDown?(event) != true { super.mouseDown(with: event) }
+    }
+}
+
+/// A line's text. Leaves the mouse to the table, which selects text across lines, and shows the
+/// text cursor.
+final class LineTextField: NSTextField {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .iBeam) }
+}
+
+/// A place in the transcript's text: a line, and a character (UTF-16) offset into it.
+struct TextSpot: Comparable {
+    let row: Int
+    let offset: Int
+
+    static func < (a: TextSpot, b: TextSpot) -> Bool { (a.row, a.offset) < (b.row, b.offset) }
+}
+
+/// The offset in `text` nearest `point`, with `text` laid out `width` wide as a label draws it.
+/// E.g. a point on the left half of the third character → 2, on its right half → 3.
+func characterOffset(at point: NSPoint, in text: NSAttributedString, width: CGFloat) -> Int {
+    let storage = NSTextStorage(attributedString: text)
+    let layout = NSLayoutManager()
+    let container = NSTextContainer(size: NSSize(width: width, height: .greatestFiniteMagnitude))
+    container.lineFragmentPadding = 2  // as in NSTextField's field editor, which lines up with the label
+    layout.addTextContainer(container)
+    storage.addLayoutManager(layout)
+    var fraction: CGFloat = 0
+    let glyph = layout.glyphIndex(for: point, in: container, fractionOfDistanceThroughGlyph: &fraction)
+    return min(text.length, layout.characterIndexForGlyph(at: glyph) + (fraction > 0.5 ? 1 : 0))
 }
 
 /// A caption row. The playing line gets an accent-tinted band; selected lines (for copying) a
@@ -66,7 +107,7 @@ func lineLengthTitle(_ seconds: Double) -> String { seconds == 0 ? "Original lin
 final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate,
                     NSSearchFieldDelegate, AVAudioPlayerDelegate {
     private let window: NSWindow
-    private let table = NSTableView()
+    private let table = LinesTable()
     private let timeColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("time"))
     private let textColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("text"))
     private let findField = NSSearchField()
@@ -105,6 +146,8 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
     private var query = ""           // what the find field searches for
     private var matches: [Int] = []  // lines containing `query`
     private var matchCursor: Int?    // the index in `matches` last jumped to
+    private var textAnchor: TextSpot?  // where the text selection started
+    private var textHead: TextSpot?    // where it ends, which moves as you drag
     private var lastManualScroll = Date.distantPast
     private var timer: Timer?
     private var skipTotal = 0.0     // how far the current run of ← / → presses has moved
@@ -161,6 +204,7 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         table.delegate = self
         table.target = self
         table.action = #selector(lineClicked)
+        table.onMouseDown = { [weak self] event in self?.selectText(with: event) ?? false }
 
         let scroll = NSScrollView()
         scroll.documentView = table
@@ -344,6 +388,8 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         allHidden = false
         findField.stringValue = ""
         query = ""
+        textAnchor = nil
+        textHead = nil
         table.deselectAll(nil)
         table.reloadData()
         table.scrollRowToVisible(0)
@@ -385,12 +431,18 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         tick()
     }
 
-    /// A plain click plays from the line; ⌘-click and ⇧-click only select, for copying.
+    /// A plain click beside the text plays from the line; ⌘-click and ⇧-click only select, for
+    /// copying. Either drops the text selection. Clicks on the text go to selectText(with:).
     @objc private func lineClicked() {
-        guard let player, lines.indices.contains(table.clickedRow),
-              NSApp.currentEvent?.modifierFlags.isDisjoint(with: [.command, .shift]) ?? true else { return }
+        setTextSelection(nil, nil)
+        guard NSApp.currentEvent?.modifierFlags.isDisjoint(with: [.command, .shift]) ?? true else { return }
+        play(fromLine: table.clickedRow)
+    }
+
+    private func play(fromLine row: Int) {
+        guard let player, lines.indices.contains(row) else { return }
         table.deselectAll(nil)  // the playing line's band shows where it is
-        player.currentTime = max(0, lines[table.clickedRow].start - leadIn)
+        player.currentTime = max(0, lines[row].start - leadIn)
         player.play()
         lastManualScroll = .distantPast
         tick()
@@ -511,6 +563,8 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         defaults.set(lineLengths[lineLength.indexOfSelectedItem], forKey: lineSecondsKey)
         lines = regrouped()
         current = -1  // tick() finds the playing line in the new list
+        textAnchor = nil  // its offsets were into the old lines
+        textHead = nil
         // Single covers were by row, which no longer match; a covered transcript stays covered.
         hidden = allHidden ? IndexSet(integersIn: lines.indices) : []
         table.deselectAll(nil)
@@ -672,10 +726,102 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         return true
     }
 
+    // MARK: Text selection
+
+    /// The selected text's start and end, or nil when nothing is selected.
+    private var textSelection: (from: TextSpot, to: TextSpot)? {
+        guard let textAnchor, let textHead, textAnchor != textHead else { return nil }
+        return (min(textAnchor, textHead), max(textAnchor, textHead))
+    }
+
+    /// The part of `row`'s text that's selected, if any.
+    private func selectedRange(_ row: Int) -> NSRange? {
+        guard let (from, to) = textSelection, from.row <= row, row <= to.row else { return nil }
+        let start = row == from.row ? from.offset : 0
+        let end = row == to.row ? to.offset : lines[row].text.utf16.count
+        return NSRange(location: start, length: end - start)
+    }
+
+    private func setTextSelection(_ anchor: TextSpot?, _ head: TextSpot?) {
+        let before = textSelection
+        textAnchor = anchor
+        textHead = head
+        let rows = [before, textSelection].compactMap { $0 }.map { IndexSet(integersIn: $0.from.row...$0.to.row) }
+        refreshText(rows.reduce(IndexSet()) { $0.union($1) })
+    }
+
+    /// Selects text with the mouse, from the line under the press to wherever it's dragged,
+    /// scrolling at the edges. A double-click selects a word and a triple-click the line, and
+    /// dragging after either extends by characters. A click that selects nothing plays from the
+    /// line. Returns false, leaving the event to the table, for ⌘-click, ⇧-click, and presses
+    /// beside the text.
+    private func selectText(with event: NSEvent) -> Bool {
+        let point = table.convert(event.locationInWindow, from: nil)
+        guard event.modifierFlags.isDisjoint(with: [.command, .shift]),
+              table.column(at: point) == table.column(withIdentifier: textColumn.identifier),
+              table.row(at: point) >= 0, let spot = textSpot(at: event.locationInWindow) else { return false }
+        window.makeFirstResponder(table)
+        table.deselectAll(nil)
+        let text = lines[spot.row].text as NSString
+        let word = text.length == 0 ? NSRange() : NSAttributedString(string: text as String)
+            .doubleClick(at: min(spot.offset, text.length - 1))
+        let pressed = event.clickCount == 1 ? (spot, spot)
+            : event.clickCount == 2 ? (TextSpot(row: spot.row, offset: word.lowerBound), TextSpot(row: spot.row, offset: word.upperBound))
+            : (TextSpot(row: spot.row, offset: 0), TextSpot(row: spot.row, offset: text.length))
+        setTextSelection(pressed.0, pressed.1)
+
+        // Periodic events keep it scrolling while the mouse rests past an edge.
+        NSEvent.startPeriodicEvents(afterDelay: 0.1, withPeriod: 0.05)
+        defer { NSEvent.stopPeriodicEvents() }
+        var drag = event
+        while let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp, .periodic]),
+              next.type != .leftMouseUp {
+            if next.type == .leftMouseDragged { drag = next }
+            table.autoscroll(with: drag)
+            lastManualScroll = Date()  // auto-scroll waits while you select
+            guard let to = textSpot(at: drag.locationInWindow) else { continue }
+            // Keeps the pressed word or line selected, whichever way the drag goes.
+            if to < pressed.0 { setTextSelection(pressed.1, to) } else { setTextSelection(pressed.0, max(to, pressed.1)) }
+        }
+        if textSelection == nil { play(fromLine: spot.row) }
+        return true
+    }
+
+    /// The spot in the text nearest `windowPoint`: in the line beside it, or the start of the
+    /// first line above them all, or the end of the last line below them.
+    private func textSpot(at windowPoint: NSPoint) -> TextSpot? {
+        guard !lines.isEmpty else { return nil }
+        let row = table.row(at: table.convert(windowPoint, from: nil))
+        guard row >= 0 else {
+            let above = table.convert(windowPoint, from: nil).y < table.rect(ofRow: 0).minY
+            return above ? TextSpot(row: 0, offset: 0) : TextSpot(row: lines.count - 1, offset: lines[lines.count - 1].text.utf16.count)
+        }
+        guard let field = table.view(atColumn: table.column(withIdentifier: textColumn.identifier),
+                                     row: row, makeIfNecessary: true) as? NSTextField else { return nil }
+        return TextSpot(row: row, offset: characterOffset(at: field.convert(windowPoint, from: nil),
+                                                          in: field.attributedStringValue, width: field.bounds.width))
+    }
+
+    /// The selected text, a line of it per line it spans; covered lines are left out.
+    private var selectedText: String? {
+        guard let (from, to) = textSelection else { return nil }
+        return (from.row...to.row).filter { !hidden.contains($0) }
+            .compactMap { row in selectedRange(row).map { (lines[row].text as NSString).substring(with: $0) } }
+            .joined(separator: "\n")
+    }
+
     // MARK: Copy
 
-    /// ⌘C: the selected lines, or the playing one when none are selected.
+    /// ⌘C: the selected text, else the selected lines, else the playing one.
     @objc func copy(_ sender: Any?) {
+        if let selectedText {
+            guard !selectedText.isEmpty else { return }  // only covered lines are selected
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(selectedText, forType: .string)
+            hideHint()
+            flashHint("Copied", symbol: "checkmark")
+            return
+        }
         let rows = table.selectedRowIndexes.isEmpty && current >= 0
             ? IndexSet(integer: current) : table.selectedRowIndexes
         guard !rows.isEmpty else { return }
@@ -727,7 +873,7 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
             return icon
         }
         let cell = tableView.makeView(withIdentifier: id, owner: self) as? NSTextField
-            ?? NSTextField(wrappingLabelWithString: "")
+            ?? (id == textColumn.identifier ? LineTextField(wrappingLabelWithString: "") : NSTextField(wrappingLabelWithString: ""))
         cell.identifier = id
         if id == textColumn.identifier {
             cell.attributedStringValue = styledText(row)
@@ -745,7 +891,7 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
     }
 
     /// A line's text as shown: covered, or dimmed once played, with every match of the search
-    /// highlighted.
+    /// highlighted, and the selected part of it.
     private func styledText(_ row: Int) -> NSAttributedString {
         let text = lines[row].text
         if hidden.contains(row) {
@@ -760,6 +906,9 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
             out.addAttributes([.backgroundColor: NSColor.findHighlightColor, .foregroundColor: NSColor.black],
                               range: NSRange(found, in: text))
             rest = found.upperBound..<text.endIndex
+        }
+        if let selected = selectedRange(row) {
+            out.addAttribute(.backgroundColor, value: NSColor.selectedTextBackgroundColor, range: selected)
         }
         return out
     }

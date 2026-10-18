@@ -176,7 +176,9 @@ lines as they were saved; the choice is remembered, and the saved recording isn'
 back to the default size. **⌘F** finds text in the transcript: matches are highlighted,
 Return / Shift+Return go to the next / previous one, and Esc clears the search. **⌘C** copies the
 selected lines (⌘-click or ⇧-click to select, ⌘A for all), or the playing line when none are
-selected, as `[m:ss] text`; **Copy transcript** copies them all. A line under the playback bar
+selected, as `[m:ss] text`. To copy just some of the text, drag over it, across lines if you like
+(double-click selects a word, triple-click a line), then press **⌘C**; it's copied as shown, a
+line per line, without times. **Copy transcript** copies them all. A line under the playback bar
 lists these keys. An orange mic icon marks the lines you spoke in, so you can jump straight to
 them.
 

@@ -2,7 +2,7 @@
 // lines already played are dimmed, and the highlighted line is kept in view. Clicking any line
 // plays the audio from there. A mic icon marks the lines the user spoke in. ← / → skip back /
 // forward by the step set in the playback bar, and a hint in the corner shows how far. ↑ / ↓
-// restart the playing line, then go to the previous / next one. [ / ] change the speed. C covers
+// restart the playing line, then go to the previous / next one. < / > change the speed. C covers
 // the playing line and Shift+C the whole transcript (press again to uncover). ⌘F finds text in
 // the transcript. Dragging over the text selects it, across lines too (double-click selects a
 // word, triple-click a line), and ⌘C copies it; with no text selected, ⌘C copies the selected
@@ -19,7 +19,7 @@ let manualScrollPause = 3.0  // seconds auto-scroll waits after the user scrolls
 let seekStepKey = "replaySeekStep"
 let defaultSeekStep = 3.0    // seconds ← / → skip until the user changes it
 let rateKey = "replayRate"
-let rates: [Float] = [0.75, 1, 1.25, 1.5, 2]
+let rates: [Float] = [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3]  // AVAudioPlayer stalls above 3×
 let lineSecondsKey = "replayLineSeconds"
 let lineLengths: [Double] = [0, 3, 5, 8, 10, 15, 20, 30]  // seconds per line; 0 keeps Deepgram's
 let textSizeKey = "replayTextSize"
@@ -140,6 +140,7 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         let saved = Float(defaults.object(forKey: rateKey) as? Double ?? 1)
         return rates.contains(saved) ? saved : 1
     }()
+    private var rateIndex: Int { rates.firstIndex(of: rate)! }  // `rate` is always one of `rates`
     private var current = -1
     private var hidden = IndexSet()  // lines whose text is covered
     private var allHidden = false    // what the last Shift+C did, so the next one does the opposite
@@ -232,8 +233,8 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         speed.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         speed.target = self
         speed.action = #selector(speedChosen)
-        speed.toolTip = "Playback speed  [ ]"
-        speed.selectItem(at: rates.firstIndex(of: rate) ?? 1)
+        speed.toolTip = "Playback speed  < >"
+        speed.selectItem(at: rateIndex)
         lineLength.addItems(withTitles: lineLengths.map(lineLengthTitle))
         lineLength.controlSize = .small
         lineLength.font = speed.font
@@ -268,7 +269,7 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
 
         // Lists the keys handled by the monitor below; keep the two in step.
         let keys = NSTextField(wrappingLabelWithString:
-            "Space play · ← → skip · ↑ ↓ line · [ ] speed · C cover line · ⇧C cover all · ⌘F find · ⌘C copy · ⌘+ ⌘- text size")
+            "Space play · ← → skip · ↑ ↓ line · < > speed · C cover line · ⇧C cover all · ⌘F find · ⌘C copy · ⌘+ ⌘- text size")
         keys.font = .systemFont(ofSize: 11)
         keys.textColor = .tertiaryLabelColor
         keys.alignment = .center
@@ -328,7 +329,7 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
 
         // Keep in step with the hint line under the bar:
         // while Replay is the key window, Space toggles playback, ← / → skip (held, they repeat),
-        // ↑ / ↓ restart the playing line or go to the previous / next one, [ / ] change the speed,
+        // ↑ / ↓ restart the playing line or go to the previous / next one, < / > change the speed,
         // C covers the playing line and Shift+C the whole transcript. Not while typing in the
         // find field, where these keys edit the text. ⌘+ / ⌘- / ⌘0 change the text size, there too.
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -345,8 +346,8 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
             case kVK_RightArrow: self.seek(by: self.stepper.doubleValue)
             case kVK_UpArrow: self.jumpLine(by: -1)
             case kVK_DownArrow: self.jumpLine(by: 1)
-            case kVK_ANSI_LeftBracket where plain: self.stepRate(by: -1)
-            case kVK_ANSI_RightBracket where plain: self.stepRate(by: 1)
+            case kVK_ANSI_Comma where plain && event.modifierFlags.contains(.shift): self.stepRate(by: -1)  // <
+            case kVK_ANSI_Period where plain && event.modifierFlags.contains(.shift): self.stepRate(by: 1)  // >
             case kVK_ANSI_C where plain && !event.isARepeat:
                 if event.modifierFlags.contains(.shift) { self.toggleAllHidden() } else { self.toggleCurrentHidden() }
             default: return event
@@ -489,9 +490,9 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
 
     @objc private func speedChosen() { setRate(rates[speed.indexOfSelectedItem]) }
 
-    /// `[` / `]`: the next slower / faster speed, shown in the corner pill.
+    /// `<` / `>`: the next slower / faster speed, shown in the corner pill.
     private func stepRate(by offset: Int) {
-        let i = (rates.firstIndex(of: rate) ?? 1) + offset
+        let i = rateIndex + offset
         guard rates.indices.contains(i), player != nil else { return }
         setRate(rates[i])
         hideHint()  // ends any skip run, so the pill shows only this
@@ -502,7 +503,7 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         rate = newRate
         defaults.set(Double(rate), forKey: rateKey)
         player?.rate = rate
-        speed.selectItem(at: rates.firstIndex(of: rate) ?? 1)
+        speed.selectItem(at: rateIndex)
     }
 
     /// Flashes how far the current run of ← / → presses has moved, e.g. "⟲ 9s", for 1.5 s.

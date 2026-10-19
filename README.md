@@ -166,7 +166,7 @@ start; change it with the arrows beside it, and it's remembered). A hint above t
 skipped. **↑** / **↓** restart the line being played; pressed again within a second, they go to
 the previous / next line. **C** covers or uncovers the line being played, and **Shift+C** covers or uncovers the
 whole transcript (handy for listening first). Covered lines are shown again the next time you
-open the recording. **[** / **]** slow down / speed up playback (0.75× to 2×, also in the menu
+open the recording. **<** / **>** slow down / speed up playback (0.5× to 3×, also in the menu
 next to the clock, and remembered). The **Lines** menu beside it rebuilds the transcript into lines
 of about 3 to 30 seconds each, splitting long lines and merging short ones; a line ends at a
 sentence end where it can, and never runs across a pause of 2 s or more. Word times inside a line

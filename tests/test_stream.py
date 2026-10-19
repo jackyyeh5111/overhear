@@ -1,6 +1,10 @@
 import asyncio
+import io
 import json
 import os
+import subprocess
+
+import pytest
 
 import stream_system_audio
 from recording import Recording
@@ -77,7 +81,7 @@ def test_build_helper_links_plist_and_rebuilds_when_it_changes(tmp_path, monkeyp
         path.write_text("")
         os.utime(path, (mtime, mtime))
     runs = []
-    monkeypatch.setattr(stream_system_audio.subprocess, "run", lambda args, check: runs.append(args))
+    monkeypatch.setattr(stream_system_audio.subprocess, "Popen", fake_swiftc(runs, []))
 
     stream_system_audio.build_helper([str(src)], str(binary))  # binary newer than the source
     assert runs == []
@@ -86,3 +90,50 @@ def test_build_helper_links_plist_and_rebuilds_when_it_changes(tmp_path, monkeyp
     assert args[-1] == str(src)
     assert ["-sectcreate", "__TEXT", "__info_plist", str(plist)] == [
         a for a in args if a != "-Xlinker"][-5:-1]
+
+
+def fake_swiftc(runs, messages, code=0):
+    """A stand-in for subprocess.Popen running `swiftc -parseable-output`: records its arguments,
+    sends `messages` (dicts, or str lines) on stderr the way swiftc does, and exits with `code`."""
+    def encode(message):
+        if isinstance(message, str):
+            return message.encode()
+        body = json.dumps(message).encode()
+        return str(len(body)).encode() + b"\n" + body + b"\n"
+
+    class Popen:
+        def __init__(self, args, stderr):
+            runs.append(args)
+            self.stderr = io.BytesIO(b"".join(map(encode, messages)))
+
+        def wait(self):
+            return code
+    return Popen
+
+
+def finished(name, output=""):
+    return {"kind": "finished", "name": name, "exit-status": 0, "output": output}
+
+
+def test_build_helper_shows_progress_and_compiler_output(tmp_path, monkeypatch, capsys):
+    srcs = [str(tmp_path / f"{name}.swift") for name in "abc"]
+    messages = [{"kind": "began", "name": "compile"}, finished("compile"),
+                finished("compile", "a.swift:1:5: warning: unused\n"), finished("compile"),
+                finished("link")]
+    monkeypatch.setattr(stream_system_audio.subprocess, "Popen", fake_swiftc([], messages))
+
+    stream_system_audio.build_helper(srcs, str(tmp_path / "app"))
+    out = capsys.readouterr().out
+    assert [part.rsplit(" ", 1)[1] for part in out.split("\r")[:-1]] == ["0%", "25%", "50%", "75%", "99%"]
+    assert out.split("\r")[-1] == "Building app helper (one-time)... 100%\na.swift:1:5: warning: unused\n"
+
+
+def test_build_helper_fails_with_the_errors(tmp_path, monkeypatch, capsys):
+    messages = ["<unknown>:0: error: no such file\n",
+                {**finished("compile", "a.swift:1:9: error: bad\n"), "exit-status": 1}]
+    monkeypatch.setattr(stream_system_audio.subprocess, "Popen", fake_swiftc([], messages, code=1))
+
+    with pytest.raises(subprocess.CalledProcessError):
+        stream_system_audio.build_helper([str(tmp_path / "a.swift")], str(tmp_path / "app"))
+    assert capsys.readouterr().out.endswith(
+        "\n<unknown>:0: error: no such file\na.swift:1:9: error: bad\n")

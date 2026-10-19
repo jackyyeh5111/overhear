@@ -81,10 +81,37 @@ def build_helper(srcs: list[str], binary: str, plist: str | None = None):
     inputs = srcs + ([plist] if plist else [])
     if os.path.exists(binary) and os.path.getmtime(binary) >= max(map(os.path.getmtime, inputs)):
         return
-    print(f"Building {os.path.basename(binary)} helper (one-time)...")
+    label = f"Building {os.path.basename(binary)} helper (one-time)..."
+    print(f"{label} 0%", end="", flush=True)
     link = ["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist",
             "-Xlinker", plist] if plist else []
-    subprocess.run(["swiftc", "-O", "-swift-version", "5", "-o", binary, *link, *srcs], check=True)
+    args = ["swiftc", "-parseable-output", "-O", "-swift-version", "5", "-o", binary, *link, *srcs]
+    proc = subprocess.Popen(args, stderr=subprocess.PIPE)
+    jobs = len(srcs) + 1  # a compile per source, then the link
+    done, output = 0, []
+    for message in swiftc_messages(proc.stderr):
+        if isinstance(message, str):
+            output.append(message)
+        elif message["kind"] in ("finished", "signalled"):
+            done += 1
+            output.append(message.get("output", ""))
+            print(f"\r{label} {min(99, 100 * done // jobs)}%", end="", flush=True)
+    code = proc.wait()
+    print(f"\r{label} 100%" if code == 0 else "")
+    print("".join(output), end="")  # warnings and errors, which swiftc would have printed
+    if code:
+        raise subprocess.CalledProcessError(code, args)
+
+
+def swiftc_messages(stream):
+    """Yields `swiftc -parseable-output`'s messages from `stream`, as dicts. Each is sent as its
+    length in bytes on a line, then that much JSON, e.g. b'27\\n{"kind": "finished", ...}\\n'. Any
+    other line (the driver's own errors) is yielded as is, as a str."""
+    while line := stream.readline():
+        if line.strip().isdigit():
+            yield json.loads(stream.read(int(line)))
+        elif line.strip():
+            yield line.decode(errors="replace")
 
 
 class UI:

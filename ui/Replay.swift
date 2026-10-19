@@ -6,9 +6,11 @@
 // the playing line and Shift+C the whole transcript (press again to uncover). ⌘F finds text in
 // the transcript. Dragging over the text selects it, across lines too (double-click selects a
 // word, triple-click a line), and ⌘C copies it; with no text selected, ⌘C copies the selected
-// lines (⌘-click or ⇧-click to select). The Lines menu rebuilds the transcript into lines of about
-// N seconds each (see Lines.swift). ⌘+ / ⌘- make the text bigger / smaller, and ⌘0 goes back to
-// the default size.
+// lines (⌘-click or ⇧-click to select). ⌘S / ⌘E make the playing line the start / end of a range
+// (see PlayRange.swift): playback that runs past its end goes back to its start, or, with L
+// switching looping off, waits there; Esc clears it. The Lines menu rebuilds the transcript into
+// lines of about N seconds each (see Lines.swift). ⌘+ / ⌘- make the text bigger / smaller, and ⌘0
+// goes back to the default size.
 import AppKit
 import AVFoundation
 import Carbon.HIToolbox  // kVK_ key codes
@@ -20,6 +22,7 @@ let seekStepKey = "replaySeekStep"
 let defaultSeekStep = 3.0    // seconds ← / → skip until the user changes it
 let rateKey = "replayRate"
 let rates: [Float] = [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3]  // AVAudioPlayer stalls above 3×
+let loopKey = "replayLoop"
 let lineSecondsKey = "replayLineSeconds"
 let lineLengths: [Double] = [0, 3, 5, 8, 10, 15, 20, 30]  // seconds per line; 0 keeps Deepgram's
 let textSizeKey = "replayTextSize"
@@ -73,18 +76,27 @@ func characterOffset(at point: NSPoint, in text: NSAttributedString, width: CGFl
 
 /// A caption row. The playing line gets an accent-tinted band; selected lines (for copying) a
 /// gray one. Text keeps its colors either way, so dimmed and highlighted words stay readable.
+/// Lines in the loop range get an accent bar down their left edge, which joins up across them.
 final class LineRowView: NSTableRowView {
     var isCurrent = false {
         didSet { if isCurrent != oldValue { needsDisplay = true } }
+    }
+    var inRange = false {
+        didSet { if inRange != oldValue { needsDisplay = true } }
     }
 
     override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
 
     override func drawBackground(in dirtyRect: NSRect) {
         super.drawBackground(in: dirtyRect)
-        guard isCurrent else { return }
-        NSColor.controlAccentColor.withAlphaComponent(0.18).setFill()
-        band.fill()
+        if isCurrent {
+            NSColor.controlAccentColor.withAlphaComponent(0.18).setFill()
+            band.fill()
+        }
+        if inRange {
+            NSColor.controlAccentColor.setFill()
+            NSRect(x: 0, y: 0, width: 3, height: bounds.height).fill()
+        }
     }
 
     override func drawSelection(in dirtyRect: NSRect) {
@@ -141,6 +153,9 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         return rates.contains(saved) ? saved : 1
     }()
     private var rateIndex: Int { rates.firstIndex(of: rate)! }  // `rate` is always one of `rates`
+    private var range = PlayRange()  // the lines ⌘S / ⌘E marked, for this viewing only
+    private var loops = defaults.object(forKey: loopKey) as? Bool ?? true  // L: loop the range, or stop at its end
+    private var lastTime = 0.0       // where playback was at the last tick() or jump, to see it run past the range
     private var current = -1
     private var hidden = IndexSet()  // lines whose text is covered
     private var allHidden = false    // what the last Shift+C did, so the next one does the opposite
@@ -269,7 +284,7 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
 
         // Lists the keys handled by the monitor below; keep the two in step.
         let keys = NSTextField(wrappingLabelWithString:
-            "Space play · ← → skip · ↑ ↓ line · < > speed · C cover line · ⇧C cover all · ⌘F find · ⌘C copy · ⌘+ ⌘- text size")
+            "Space play · ← → skip · ↑ ↓ line · < > speed · C cover line · ⇧C cover all · ⌘S ⌘E range start / end · L loop · Esc clear range · ⌘F find · ⌘C copy · ⌘+ ⌘- text size")
         keys.font = .systemFont(ofSize: 11)
         keys.textColor = .tertiaryLabelColor
         keys.alignment = .center
@@ -330,8 +345,9 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         // Keep in step with the hint line under the bar:
         // while Replay is the key window, Space toggles playback, ← / → skip (held, they repeat),
         // ↑ / ↓ restart the playing line or go to the previous / next one, < / > change the speed,
-        // C covers the playing line and Shift+C the whole transcript. Not while typing in the
-        // find field, where these keys edit the text. ⌘+ / ⌘- / ⌘0 change the text size, there too.
+        // C covers the playing line and Shift+C the whole transcript, ⌘S / ⌘E mark the range's
+        // start / end, L switches looping it, and Esc clears it. Not while typing in the find
+        // field, where these keys edit the text. ⌘+ / ⌘- / ⌘0 change the text size, there too.
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, event.window === self.window else { return event }
             if let size = self.requestedTextSize(event) {
@@ -340,6 +356,7 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
             }
             guard !(self.window.firstResponder is NSTextView) else { return event }
             let plain = event.modifierFlags.isDisjoint(with: [.command, .option, .control])
+            let command = event.modifierFlags.intersection([.command, .option, .control, .shift]) == .command
             switch Int(event.keyCode) {
             case kVK_Space: self.togglePlay()
             case kVK_LeftArrow: self.seek(by: -self.stepper.doubleValue)
@@ -350,6 +367,10 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
             case kVK_ANSI_Period where plain && event.modifierFlags.contains(.shift): self.stepRate(by: 1)  // >
             case kVK_ANSI_C where plain && !event.isARepeat:
                 if event.modifierFlags.contains(.shift) { self.toggleAllHidden() } else { self.toggleCurrentHidden() }
+            case kVK_ANSI_S where command: self.markStart()
+            case kVK_ANSI_E where command: self.markEnd()
+            case kVK_ANSI_L where plain && !event.isARepeat: self.toggleLoop()
+            case kVK_Escape where plain && !self.range.isEmpty: self.clearRange()
             default: return event
             }
             return nil
@@ -380,8 +401,9 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         leftOffAt = player.flatMap { player in
             leftOff.time(for: recording.folder).flatMap { $0 < player.duration ? $0 : nil }
         }
-        player?.currentTime = leftOffAt ?? 0
+        jump(to: leftOffAt ?? 0)
         savedAt = leftOffAt ?? 0
+        range = PlayRange()
         window.title = recording.name
         window.subtitle = recording.title
         current = -1
@@ -443,14 +465,14 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
     private func play(fromLine row: Int) {
         guard let player, lines.indices.contains(row) else { return }
         table.deselectAll(nil)  // the playing line's band shows where it is
-        player.currentTime = max(0, lines[row].start - leadIn)
+        jump(to: max(0, lines[row].start - leadIn))
         player.play()
         lastManualScroll = .distantPast
         tick()
     }
 
     @objc private func sliderMoved() {
-        player?.currentTime = slider.doubleValue
+        jump(to: slider.doubleValue)
         lastManualScroll = .distantPast
         tick()
     }
@@ -461,7 +483,7 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
         let before = player.currentTime
         let target = before + delta
         if target >= player.duration { player.pause() }
-        player.currentTime = min(max(0, target), player.duration)
+        jump(to: min(max(0, target), player.duration))
         lastManualScroll = .distantPast  // bring the highlighted line back into view
         tick()
         showSkipHint(moved: player.currentTime - before, forward: delta > 0)
@@ -480,13 +502,21 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
     /// Moves playback to the start of `line` (the very start if it's -1), without changing
     /// play/pause, and brings it into view.
     private func go(to line: Int) {
-        guard let player else { return }
-        player.currentTime = line >= 0 ? entry(line) : 0
+        guard player != nil else { return }
+        jump(to: line >= 0 ? entry(line) : 0)
         lastManualScroll = .distantPast
         tick()
     }
 
     private func entry(_ line: Int) -> Double { max(0, lines[line].start - leadIn) }
+
+    /// Moves playback to `time`. Every jump goes through here, so tick() can tell playback that
+    /// ran past the range's end from a jump past it, which doesn't loop.
+    private func jump(to time: Double) {
+        guard let player else { return }
+        player.currentTime = time
+        lastTime = player.currentTime
+    }
 
     @objc private func speedChosen() { setRate(rates[speed.indexOfSelectedItem]) }
 
@@ -609,11 +639,18 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
 
     private func showStep() { stepLabel.stringValue = "±\(Int(stepper.doubleValue))s" }
 
-    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) { tick() }
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        // The file ran out inside the range: loop as if it had reached the end. AVAudioPlayer has
+        // already gone back to 0, so tick() can't see it.
+        if let end = range.end, range.start != nil, lastTime < end { restartRange() }
+        tick()
+    }
 
     /// Moves the highlight, slider and clock to where the audio is.
     private func tick() {
+        if range.ranPastEnd(from: lastTime, to: player?.currentTime ?? 0) { restartRange() }
         let now = player?.currentTime ?? 0
+        lastTime = now
         let duration = player?.duration ?? 0
         let symbol = player?.isPlaying == true ? "pause.circle.fill" : "play.circle.fill"
         playButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Play/Pause")?
@@ -661,6 +698,67 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
             if lines[mid].start <= time { low = mid + 1 } else { high = mid }
         }
         return low - 1
+    }
+
+    // MARK: Range
+
+    /// ⌘S: the playing line starts the range, unless it's after the range's end.
+    private func markStart() {
+        guard current >= 0 else { return }
+        guard range.setStart(lines[current]) else {
+            return flashHint("Start must be before the end", symbol: "exclamationmark.triangle")
+        }
+        rangeChanged(alone: "Start \(formatTime(lines[current].start))", symbol: "arrow.right.to.line")
+    }
+
+    /// ⌘E: the playing line ends the range, unless it's before the range's start.
+    private func markEnd() {
+        guard current >= 0 else { return }
+        guard range.setEnd(lines[current]) else {
+            return flashHint("End must be after the start", symbol: "exclamationmark.triangle")
+        }
+        rangeChanged(alone: "End \(formatTime(lines[current].end))", symbol: "arrow.left.to.line")
+    }
+
+    /// Esc.
+    private func clearRange() {
+        range = PlayRange()
+        refreshRangeBars()
+        hideHint()
+        flashHint("Range cleared", symbol: "xmark")
+    }
+
+    /// L: loop the range, or stop at its end; remembered for every recording.
+    private func toggleLoop() {
+        loops.toggle()
+        defaults.set(loops, forKey: loopKey)
+        hideHint()
+        flashHint(loops ? "Loop on" : "Loop off", symbol: loops ? "repeat" : "stop")
+    }
+
+    /// Redraws the bars, and shows the range in the pill: "Looping 0:08–0:19" once both ends are
+    /// set, else `alone`.
+    private func rangeChanged(alone: String, symbol: String) {
+        refreshRangeBars()
+        hideHint()
+        if let start = range.start, let end = range.end {
+            flashHint(loops ? "Looping \(formatTime(start))–\(formatTime(end))" : "Stops at \(formatTime(end))",
+                      symbol: loops ? "repeat" : "stop", seconds: 2.5)
+        } else {
+            flashHint(alone, symbol: symbol)
+        }
+    }
+
+    private func refreshRangeBars() {
+        table.enumerateAvailableRowViews { view, row in (view as? LineRowView)?.inRange = range.contains(lines[row]) }
+    }
+
+    /// Back to the start line, to play the range again, or, with looping off, to wait there.
+    private func restartRange() {
+        guard let start = range.start else { return }
+        jump(to: max(0, start - leadIn))
+        if loops { player?.play() } else { player?.pause() }
+        lastManualScroll = .distantPast  // bring the start line back into view
     }
 
     // MARK: Find
@@ -851,6 +949,7 @@ final class Replay: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableVi
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
         let view = LineRowView()
         view.isCurrent = row == current
+        view.inRange = range.contains(lines[row])
         return view
     }
 

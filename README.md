@@ -182,6 +182,13 @@ line per line, without times. **Copy transcript** copies them all. A line under 
 lists these keys. An orange mic icon marks the lines you spoke in, so you can jump straight to
 them.
 
+To drill one part of a recording, press **⌘S** while its first line is playing and **⌘E** while
+its last line is playing. An accent bar marks the lines in between, and whenever playback runs past
+the last one it goes back to the first and keeps going. **L** switches looping off (playback then
+waits at the first line, so Space plays the part again) and back on; the choice is remembered.
+Clicking, skipping and finding still go anywhere, and **Esc** clears the range. It lasts until you
+close the recording.
+
 ### YouTube videos
 
 Switch Home to the **YouTube** tab (click it, or press **→** in the list; **←** goes back), paste

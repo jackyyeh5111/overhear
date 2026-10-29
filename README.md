@@ -121,7 +121,9 @@ in `stream_system_audio.py`.
 - A pill in the top-left corner shows the session is live: a pulsing red dot, the time since it
   started, and a slashed icon for each input that's off. The dot turns gray while both are off.
 - The toolbar fades in while the pointer is over the overlay. Buttons (hover one to see its name): **microphone** and **system audio** on/off
-  (slashed while off), smaller/larger text, cycle how dark the frosted background is, clear the screen, **lock**
+  (slashed while off), **hide captions** (an eye; also **⌥⇧H** from any app, handy when they distract
+  you in a meeting: the session keeps recording and captioning, and unhiding shows everything you
+  missed), smaller/larger text, cycle how dark the frosted background is, clear the screen, **lock**
   (makes the window click-through, so it never gets in the way), **Save** and **Discard**.
 - Whatever is on is mixed into one transcript. With both off the session keeps running silently,
   so you can turn an input back on without starting over. If an input fails (say, the mic is

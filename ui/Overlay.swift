@@ -1,7 +1,7 @@
 // Floating transcript overlay for a live session: a transparent, always-on-top panel that never
 // takes focus and stays visible over full-screen apps. A pill in the corner shows the session is
-// live and for how long. Toggles turn the mic and system audio on and off; Save and Discard end
-// the session.
+// live and for how long. Toggles turn the mic and system audio on and off, the eye hides the
+// captions (they keep coming in, for when you look again); Save and Discard end the session.
 import AppKit
 
 let historyLimit = 50
@@ -163,6 +163,7 @@ final class Overlay: NSObject, NSWindowDelegate {
     private var toolbarShown = false
     private var hovered: ToolButton?
     private var inputButtons: [String: ToolButton] = [:]
+    private var hideButton: ToolButton!
     private var lockButton: ToolButton!
     private var saveButton: ToolButton!
     private var discardButton: ToolButton!
@@ -175,6 +176,7 @@ final class Overlay: NSObject, NSWindowDelegate {
     private var flashTimer: Timer?  // hides a short-lived banner, e.g. "Microphone off"
     private var shownError = false
     private var locked = false
+    private var captionsHidden = false
     // Remembered between runs; the first run captures system audio only.
     private(set) var inputs: [String: Bool] = [
         "system": defaults.object(forKey: "input.system") as? Bool ?? true,
@@ -271,10 +273,12 @@ final class Overlay: NSObject, NSWindowDelegate {
             showInput(look.name)
         }
         toolbar.setCustomSpacing(12, after: toolbar.arrangedSubviews.last!)
+        hideButton = button("eye", "Hide captions  ⌥⇧H", #selector(toggleCaptions))
         lockButton = button("lock.open", "Lock (click-through)", #selector(toggleLock))
         saveButton = button("square.and.arrow.down", "Save recording  ⌥⇧S", #selector(save))
         discardButton = button("trash", "Discard recording  ⌥⇧D", #selector(discard))
         for view in [
+            hideButton!,
             button("textformat.size.smaller", "Smaller text", #selector(smaller)),
             button("textformat.size.larger", "Larger text", #selector(larger)),
             button("circle.lefthalf.filled", "Background opacity", #selector(cycleOpacity)),
@@ -399,6 +403,7 @@ final class Overlay: NSObject, NSWindowDelegate {
         draft = ""
         status = ""
         shownError = false
+        setCaptionsHidden(false)
         saveButton.isEnabled = true
         discardButton.isEnabled = true
         startedAt = Date()
@@ -581,6 +586,12 @@ final class Overlay: NSObject, NSWindowDelegate {
             ]
             out.append(NSAttributedString(string: (out.length > 0 ? "\n" : "") + line, attributes: attrs))
         }
+        let small = NSFont.systemFont(ofSize: max(fontSizes.lowerBound, fontSize * 0.7), weight: .medium)
+        if captionsHidden {
+            add("Captions hidden  ·  ⌥⇧H to show", NSColor.white.withAlphaComponent(0.4), font: small)
+            text.textStorage?.setAttributedString(out)
+            return
+        }
         // The newest line is brightest, so the eye lands on it; in-progress text is fainter still.
         for (i, line) in finals.enumerated() {
             add(line.text, line.isError ? NSColor(red: 1, green: 0.45, blue: 0.45, alpha: 1)
@@ -588,8 +599,7 @@ final class Overlay: NSObject, NSWindowDelegate {
         }
         if !draft.isEmpty { add(draft, NSColor.white.withAlphaComponent(0.55)) }
         if out.length == 0 && !status.isEmpty {
-            add(status, NSColor.white.withAlphaComponent(0.5),
-                font: .systemFont(ofSize: max(fontSizes.lowerBound, fontSize * 0.7), weight: .medium))
+            add(status, NSColor.white.withAlphaComponent(0.5), font: small)
         }
 
         text.textStorage?.setAttributedString(out)
@@ -625,6 +635,23 @@ final class Overlay: NSObject, NSWindowDelegate {
         draft = ""
         shownError = false
         render()
+    }
+
+    @objc private func toggleCaptions() { setCaptionsHidden(!captionsHidden) }
+
+    /// ⌥⇧H, like ⌥⇧M: the toolbar is likely hidden, so the banner says what happened.
+    func toggleCaptionsKey() {
+        toggleCaptions()
+        flashBanner(captionsHidden ? "Captions hidden" : "Captions shown", icon: hideButton.image)
+    }
+
+    /// Hidden captions still pile up behind the placeholder, so showing them again catches you up.
+    private func setCaptionsHidden(_ hidden: Bool) {
+        captionsHidden = hidden
+        hideButton.image = symbol(hidden ? "eye.slash" : "eye", "Captions")
+        hideButton.hint = (hidden ? "Show captions" : "Hide captions") + "  ⌥⇧H"
+        render()
+        if !hidden { text.scrollToEndOfDocument(nil) }
     }
 
     @objc private func toggleInput(_ sender: ToolButton) {

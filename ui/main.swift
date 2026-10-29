@@ -96,11 +96,12 @@ let overlay = Overlay()
 let replay = Replay()
 let home = Home(recordingsDir: recordingsDir, youtubeDir: youtubeDir)
 
-// ⌥⇧R starts a session; ⌥⇧M toggles the mic during it; ⌥⇧S and ⌥⇧D end it. Each is live only
+// ⌥⇧R starts a session; ⌥⇧M toggles the mic during it, ⌥⇧H hides the captions; ⌥⇧S and ⌥⇧D end it. Each is live only
 // when it can do something.
 let startKey = HotKey(kVK_ANSI_R) { home.start() }
 let sessionKeys = [
     HotKey(kVK_ANSI_M) { overlay.toggleMic() },
+    HotKey(kVK_ANSI_H) { overlay.toggleCaptionsKey() },
     HotKey(kVK_ANSI_S) { overlay.save() },
     HotKey(kVK_ANSI_D) { overlay.discard() },
 ]
